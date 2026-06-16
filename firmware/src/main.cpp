@@ -8,6 +8,10 @@
 
 #include "AlbumClockConfig.h"
 
+#if __has_include("LocalSecrets.h")
+#include "LocalSecrets.h"
+#endif
+
 MatrixPanel_I2S_DMA *display = nullptr;
 Preferences prefs;
 
@@ -106,6 +110,27 @@ void maybeResetSettings() {
 
 void connectWifiAndConfigure() {
   WiFi.mode(WIFI_STA);
+
+#ifdef LOCAL_WIFI_SSID
+  String localFrameUrl = frameUrl;
+#ifdef LOCAL_FRAME_URL
+  localFrameUrl = LOCAL_FRAME_URL;
+#endif
+  saveSettings(localFrameUrl, brightness);
+
+  showStatus("WIFI", "JOIN", display->color565(80, 180, 255));
+  WiFi.begin(LOCAL_WIFI_SSID, LOCAL_WIFI_PASSWORD);
+  unsigned long startedAt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startedAt < 30000) {
+    delay(250);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    showStatus("WIFI", "READY", display->color565(40, 255, 120));
+    delay(600);
+    return;
+  }
+  showStatus("WIFI", "PORTAL", display->color565(255, 180, 0));
+#endif
 
   char urlBuffer[256];
   char brightnessBuffer[8];

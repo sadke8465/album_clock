@@ -2,7 +2,7 @@
 
 // GitHub Pages URL created by the workflow. You can also set this from the
 // captive setup portal after flashing.
-#define DEFAULT_FRAME_URL "https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPO/frame.rgb565"
+#define DEFAULT_FRAME_URL "https://sadke8465.github.io/album_clock/frame.rgb565"
 
 #define WIFI_SETUP_AP_NAME "AlbumClock-Setup"
 #define WIFI_SETUP_AP_PASSWORD ""

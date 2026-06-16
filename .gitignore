@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 firmware/.pio/
 firmware/.vscode/
+firmware/include/LocalSecrets.h
