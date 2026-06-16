@@ -1,0 +1,4 @@
+type,value,artist,album,title
+# Add fallback rows below. Examples:
+# image_url,https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg,,,Sample image
+# search,,Daft Punk,Discovery,Discovery

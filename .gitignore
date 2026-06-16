@@ -1,0 +1,8 @@
+.cache/
+.venv/
+public/
+__pycache__/
+*.pyc
+.DS_Store
+firmware/.pio/
+firmware/.vscode/
