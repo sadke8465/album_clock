@@ -28,6 +28,7 @@ class Candidate:
     artist: str = ""
     album: str = ""
     image_url: str = ""
+    apple_track_id: str = ""
     apple_album_id: str = ""
     musicbrainz_release_group: str = ""
     source_detail: str = ""
@@ -136,16 +137,21 @@ def load_csv_candidates(path: Path) -> List[Candidate]:
             line for line in handle if line.strip() and not line.lstrip().startswith("#")
         )
         for raw in reader:
-            row = {k.strip(): (v or "").strip() for k, v in raw.items() if k}
+            row = {k.strip().lower(): (v or "").strip() for k, v in raw.items() if k}
+            apple_url = row.get("url", "")
+            apple_id = row.get("id", "")
             mode = row.get("type") or ("image_url" if row.get("value", "").startswith("http") else "search")
             value = row.get("value", "")
+            if apple_id and apple_url.startswith("https://music.apple.com/"):
+                mode = "apple_track_id"
             rows.append(
                 Candidate(
                     mode=mode,
-                    title=row.get("title", ""),
+                    title=row.get("title", "") or row.get("name", ""),
                     artist=row.get("artist", ""),
                     album=row.get("album", ""),
                     image_url=row.get("image_url", "") or (value if mode == "image_url" else ""),
+                    apple_track_id=row.get("apple_track_id", "") or (value if mode == "apple_track_id" else "") or apple_id,
                     apple_album_id=row.get("apple_album_id", "") or (value if mode == "apple_album_id" else ""),
                     musicbrainz_release_group=row.get("musicbrainz_release_group", "")
                     or (value if mode in {"musicbrainz_release_group", "mbid"} else ""),
@@ -218,11 +224,19 @@ def itunes_artwork_url(candidate: Candidate, cache: Dict[str, Any]) -> str:
     if not env_bool("ENABLE_ITUNES_FALLBACK", True):
         return ""
 
-    key = cache_key("itunes", candidate.apple_album_id or candidate.artist, candidate.album, candidate.title)
+    key = cache_key(
+        "itunes",
+        candidate.apple_track_id or candidate.apple_album_id or candidate.artist,
+        candidate.album,
+        candidate.title,
+    )
     if key in cache:
         return cache[key].get("image_url", "")
 
-    if candidate.apple_album_id:
+    if candidate.apple_track_id:
+        params = urllib.parse.urlencode({"id": candidate.apple_track_id, "limit": "1"})
+        url = f"https://itunes.apple.com/lookup?{params}"
+    elif candidate.apple_album_id:
         params = urllib.parse.urlencode({"id": candidate.apple_album_id, "entity": "album", "limit": "1"})
         url = f"https://itunes.apple.com/lookup?{params}"
     else:

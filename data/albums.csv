@@ -1,4 +1,235 @@
-type,value,artist,album,title
-# Add fallback rows below. Examples:
-# image_url,https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg,,,Sample image
-# search,,Daft Punk,Discovery,Discovery
+Name,Artist,Album,URL,ID
+Definition,Black Star,Mos Def & Talib Kweli Are Black Star,https://music.apple.com/il/song/definition/1440800364,1440800364
+Try a Little Tenderness,Otis Redding,Complete & Unbelievable: The Otis Redding Dictionary of Soul,https://music.apple.com/il/song/try-a-little-tenderness/995810734,995810734
+Band On the Run,Paul McCartney & Wings,Band on the Run (Archive Collection),https://music.apple.com/il/song/band-on-the-run/1440953773,1440953773
+Have You Ever Seen the Rain?,Creedence Clearwater Revival,Pendulum,https://music.apple.com/il/song/have-you-ever-seen-the-rain/1440948088,1440948088
+Promised Land,Elvis Presley,Promised Land,https://music.apple.com/il/song/promised-land/471740903,471740903
+No Expectations,The Rolling Stones,Beggars Banquet (2018 Remaster),https://music.apple.com/il/song/no-expectations/1500643403,1500643403
+Know Your Enemy,Rage Against the Machine,Rage Against the Machine,https://music.apple.com/il/song/know-your-enemy/191451133,191451133
+Sunny,Booker T. & The M.G.'s,Hip Hug-Her,https://music.apple.com/il/song/sunny/159363190,159363190
+I'm a Believer,The Monkees,More of the Monkees (Deluxe Edition),https://music.apple.com/il/song/im-a-believer/176080628,176080628
+Idle Moments,Grant Green,Idle Moments,https://music.apple.com/il/song/idle-moments/1443768988,1443768988
+Story of My Life,Social Distortion,Social Distortion,https://music.apple.com/il/song/story-of-my-life/197984900,197984900
+Riders On the Storm,The Doors,L.A. Woman (50th Anniversary Deluxe Edition),https://music.apple.com/il/song/riders-on-the-storm/1583624447,1583624447
+Torn,Natalie Imbruglia,Left of the Middle,https://music.apple.com/il/song/torn/263570536,263570536
+Barbara Ann,The Beach Boys,Beach Boys' Party! (Mono & Stereo),https://music.apple.com/il/song/barbara-ann/1443190721,1443190721
+Ooh La La,Faces,Ooh La La,https://music.apple.com/il/song/ooh-la-la/1031010969,1031010969
+If This Is Just a Game,David Allan Coe,Human Emotions,https://music.apple.com/il/song/if-this-is-just-a-game/912997280,912997280
+Would?,Alice In Chains,Dirt (Remastered),https://music.apple.com/il/song/would/157317248,157317248
+Setting Me Up,Dire Straits,Dire Straits (Remastered),https://music.apple.com/il/song/setting-me-up/1440801728,1440801728
+I Got Life,Galt MacDermot,Hair: Special Anniversary Edition (Remastered Original Cast Recording),https://music.apple.com/il/song/i-got-life/255355778,255355778
+Lookin' Out My Back Door,Creedence Clearwater Revival,Cosmo's Factory,https://music.apple.com/il/song/lookin-out-my-back-door/1440949146,1440949146
+Life Is so Good,John Denver,John Denver,https://music.apple.com/il/song/life-is-so-good/497756835,497756835
+הכל מבינה,Portrait,הכל מבינה,https://music.apple.com/il/song/%D7%94%D7%9B%D7%9C-%D7%9E%D7%91%D7%99%D7%A0%D7%94/1450486783,1450486783
+A Hard Rain's A-Gonna Fall,Bob Dylan,The Freewheelin' Bob Dylan,https://music.apple.com/il/song/a-hard-rains-a-gonna-fall/190759530,190759530
+Self Esteem,The Offspring,Smash (Remastered),https://music.apple.com/il/song/self-esteem/1485043450,1485043450
+Heart of Glass (7-Inch Version),Blondie,Heart of Glass - EP,https://music.apple.com/il/song/heart-of-glass-7-inch-version/781562357,781562357
+You Ain't Seen Nothing Yet,Bachman-Turner Overdrive,Not Fragile,https://music.apple.com/il/song/you-aint-seen-nothing-yet/1440762858,1440762858
+Somethin' Stupid (with Frank Sinatra),Nancy Sinatra,Sugar,https://music.apple.com/il/song/somethin-stupid-with-frank-sinatra/147735003,147735003
+אוריה החיתי,Shula Chen,שלכם,https://music.apple.com/il/song/%D7%90%D7%95%D7%A8%D7%99%D7%94-%D7%94%D7%97%D7%99%D7%AA%D7%99/1406700057,1406700057
+You Know How to Make Me Feel so Good (feat. Sharon Paige),Harold Melvin & The Blue Notes,Wake Up Everybody (feat. Teddy Pendergrass),https://music.apple.com/il/song/you-know-how-to-make-me-feel-so-good-feat-sharon-paige/292759961,292759961
+Tribute,Tenacious D,Tenacious D,https://music.apple.com/il/song/tribute/385553675,385553675
+B.Y.O.B.,System Of A Down,Mezmerize,https://music.apple.com/il/song/b-y-o-b/187472354,187472354
+Lover Lover Lover,Leonard Cohen,New Skin for the Old Ceremony,https://music.apple.com/il/song/lover-lover-lover/511065475,511065475
+Here Comes Your Man,Pixies,Here Comes Your Man - EP,https://music.apple.com/il/song/here-comes-your-man/310995700,310995700
+Bad Reputation,Joan Jett,Bad Reputation (Expanded Edition),https://music.apple.com/il/song/bad-reputation/1434145252,1434145252
+Parchman Farm,Cactus,Cactus,https://music.apple.com/il/song/parchman-farm/272506867,272506867
+Stuck In the Middle With You,Stealers Wheel,Stealers Wheel,https://music.apple.com/il/song/stuck-in-the-middle-with-you/1444004401,1444004401
+Ever Fallen in Love (With Someone You Shouldn't've?) [1996 Remastered Version],Buzzcocks,Love Bites (Special Edition),https://music.apple.com/il/song/ever-fallen-in-love-with-someone-you-shouldntve-1996/1282094705,1282094705
+Sing It Back,Moloko,I Am Not a Doctor,https://music.apple.com/il/song/sing-it-back/1436331811,1436331811
+"Bitches Brew (feat. Wayne Shorter, Bennie Maupin, John McLaughlin, Chick Corea, Joe Zawinul, Dave Holland & Harvey Brooks)",Miles Davis,Bitches Brew,https://music.apple.com/il/song/bitches-brew-feat-wayne-shorter-bennie-maupin-john/168376630,168376630
+Yellow Ledbetter,Pearl Jam,Jeremy - Single,https://music.apple.com/il/song/yellow-ledbetter/400864988,400864988
+Fearless,Pink Floyd,Meddle (2016 Remaster),https://music.apple.com/il/song/fearless/1065973617,1065973617
+Teenage Dirtbag,Wheatus,Wheatus,https://music.apple.com/il/song/teenage-dirtbag/298160976,298160976
+הכל עוד אפשרי,Mashina,משינה 2,https://music.apple.com/il/song/%D7%94%D7%9B%D7%9C-%D7%A2%D7%95%D7%93-%D7%90%D7%A4%D7%A9%D7%A8%D7%99/1571290034,1571290034
+Joy to the World,Three Dog Night,Naturally,https://music.apple.com/il/song/joy-to-the-world/1443890867,1443890867
+Dirty Work,Steely Dan,Can't Buy A Thrill,https://music.apple.com/il/song/dirty-work/1650885294,1650885294
+Machi No Dorufin,Hamada Kingo,Midnight Cruisin',https://music.apple.com/il/song/machi-no-dorufin/1445981463,1445981463
+Without You (2010 Remaster),Badfinger,No Dice,https://music.apple.com/il/song/without-you-2010-remaster/771772479,771772479
+נתפייסה,Shmulik Kraus,לבד ביחד ולבד לבד,https://music.apple.com/il/song/%D7%A0%D7%AA%D7%A4%D7%99%D7%99%D7%A1%D7%94/1571289947,1571289947
+Wild Life,Wings,Wild Life (Archive Collection) [2018 Remaster],https://music.apple.com/il/song/wild-life/1438661678,1438661678
+Dark Sweet Lady (2004 Remaster),George Harrison,George Harrison,https://music.apple.com/il/song/dark-sweet-lady-2004-remaster/1666655995,1666655995
+Hits from the Bong,Cypress Hill,Black Sunday (Deluxe),https://music.apple.com/il/song/hits-from-the-bong/1694539137,1694539137
+I'll Be Your Baby Tonight,Bob Dylan,John Wesley Harding,https://music.apple.com/il/song/ill-be-your-baby-tonight/181457711,181457711
+Wild Man in the City,Manu Dibango,O Boso,https://music.apple.com/il/song/wild-man-in-the-city/1245352488,1245352488
+Une belle histoire,Michel Fugain & Le Big Bazar,Fais comme l'oiseau,https://music.apple.com/il/song/une-belle-histoire/1676468896,1676468896
+Me and Julio Down By the Schoolyard,Paul Simon,Paul Simon,https://music.apple.com/il/song/me-and-julio-down-by-the-schoolyard/380588841,380588841
+"Quando, Quando, Quando",Tony Renis,Made In Italy,https://music.apple.com/il/song/quando-quando-quando/713221880,713221880
+A Banda,Chico Buarque,Chico Buarque de Hollanda,https://music.apple.com/il/song/a-banda/349769435,349769435
+Wave,Antônio Carlos Jobim,Wave,https://music.apple.com/il/song/wave/1484688971,1484688971
+Tide,Antônio Carlos Jobim,Tide,https://music.apple.com/il/song/tide/1469584459,1469584459
+העץ הוא גבוה,Apocalypse,אחרית הימים,https://music.apple.com/il/song/%D7%94%D7%A2%D7%A5-%D7%94%D7%95%D7%90-%D7%92%D7%91%D7%95%D7%94/1571745171,1571745171
+Imitation of Life,R.E.M.,Reveal,https://music.apple.com/il/song/imitation-of-life/1445847075,1445847075
+Junk,Paul McCartney,McCartney (2011 Remaster),https://music.apple.com/il/song/junk/1443151324,1443151324
+Through the Fire,Chaka Khan,I Feel for You,https://music.apple.com/il/song/through-the-fire/140250886,140250886
+Into the Great Wide Open,Tom Petty & The Heartbreakers,Into the Great Wide Open,https://music.apple.com/il/song/into-the-great-wide-open/1440821764,1440821764
+Give a Little Bit,Supertramp,Even In the Quietest Moments... (Remastered),https://music.apple.com/il/song/give-a-little-bit/1440868586,1440868586
+Goin' Up the Country,Canned Heat,Living the Blues,https://music.apple.com/il/song/goin-up-the-country/1452594695,1452594695
+Supersonic Rocket Ship (2022 Remaster),The Kinks,Everybody's in Show-Biz (Deluxe) [2022 Remaster],https://music.apple.com/il/song/supersonic-rocket-ship-2022-remaster/1632411801,1632411801
+Apeman,The Kinks,"Lola Versus Powerman and the Moneygoround, Part One",https://music.apple.com/il/song/apeman/1439224153,1439224153
+Long Haired Lady,Paul McCartney,Ram (Archive Collection) [2012 Remaster],https://music.apple.com/il/song/long-haired-lady/1434073409,1434073409
+Oh Happy Day (feat. Dorothy Combs Morrison),The Edwin Hawkins Singers,Oh Happy Day: The Best of The Edwin Hawkins Singers (Remastered),https://music.apple.com/il/song/oh-happy-day-feat-dorothy-combs-morrison/250110154,250110154
+ולא היה בינינו אלא זוהר,Cilla Dagan,צילה דגן,https://music.apple.com/il/song/%D7%95%D7%9C%D7%90-%D7%94%D7%99%D7%94-%D7%91%D7%99%D7%A0%D7%99%D7%A0%D7%95-%D7%90%D7%9C%D7%90-%D7%96%D7%95%D7%94%D7%A8/1406709039,1406709039
+Rikki Don't Lose That Number,Steely Dan,Pretzel Logic,https://music.apple.com/il/song/rikki-dont-lose-that-number/1696215225,1696215225
+Gotta Go Home,Boney M.,Oceans of Fantasy,https://music.apple.com/il/song/gotta-go-home/220210519,220210519
+Baby Come Back,Player,Player,https://music.apple.com/il/song/baby-come-back/1458825378,1458825378
+Across the Great Divide,The Band,The Band (Remastered),https://music.apple.com/il/song/across-the-great-divide/1440846607,1440846607
+Who Are You,The Who,Who Are You (Bonus Track Version),https://music.apple.com/il/song/who-are-you/1469576664,1469576664
+She Talks to Angels,The Black Crowes,Shake Your Money Maker,https://music.apple.com/il/song/she-talks-to-angels/1547308258,1547308258
+Sunday Morning,Margo Guryan,Take a Picture,https://music.apple.com/il/song/sunday-morning/1683428240,1683428240
+I'll Bet You,Funkadelic,Funkadelic,https://music.apple.com/il/song/ill-bet-you/1594972172,1594972172
+Helpless,"Crosby, Stills, Nash & Young",Déjà Vu (50th Anniversary Deluxe Edition),https://music.apple.com/il/song/helpless/1556346199,1556346199
+"So Long, Marianne",Leonard Cohen,Songs Of Leonard Cohen,https://music.apple.com/il/song/so-long-marianne/1826864339,1826864339
+The Cantaloupe Woman,Grant Green,His Majesty King Funk,https://music.apple.com/il/song/the-cantaloupe-woman/1437190151,1437190151
+Badfish,Sublime,Jah Won't Pay the Bills,https://music.apple.com/il/song/badfish/1443218834,1443218834
+Chapel Of Love,The Dixie Cups,The Very Best of The Dixie Cups: Chapel of Love,https://music.apple.com/il/song/chapel-of-love/1608609377,1608609377
+Mama Told Me (Not to Come),Three Dog Night,It Ain't Easy,https://music.apple.com/il/song/mama-told-me-not-to-come/1444101215,1444101215
+Jessica,The Allman Brothers Band,Brothers and Sisters (Super Deluxe Edition),https://music.apple.com/il/song/jessica/1484896031,1484896031
+Leaving on a Jet Plane,John Denver,Rhymes & Reasons,https://music.apple.com/il/song/leaving-on-a-jet-plane/498004218,498004218
+Only Love Can Break Your Heart,Neil Young,After the Gold Rush,https://music.apple.com/il/song/only-love-can-break-your-heart/1015783336,1015783336
+Working Man (Remastered 2013),Rush,Rush (Remastered 2013),https://music.apple.com/il/song/working-man-remastered-2013/1440783158,1440783158
+Poupée de cire poupée de son,France Gall,Lounge Legends: France Gall,https://music.apple.com/il/song/poup%C3%A9e-de-cire-poup%C3%A9e-de-son/1442713011,1442713011
+Only You (And You Alone),Ringo Starr,Goodnight Vienna (Bonus Track Version),https://music.apple.com/il/song/only-you-and-you-alone/1446023472,1446023472
+Georgia On a Fast Train,Johnny Cash,The Adventures of Johnny Cash,https://music.apple.com/il/song/georgia-on-a-fast-train/362559336,362559336
+Once I Had a Love (a.k.a.. The Disco Song) [Bonus Track],Blondie,Plastic Letters (Bonus Tracks Edition),https://music.apple.com/il/song/once-i-had-a-love-a-k-a-the-disco-song-bonus-track/724418400,724418400
+Can't Find My Way Home,Blind Faith,Blind Faith,https://music.apple.com/il/song/cant-find-my-way-home/1440835856,1440835856
+Sooner Or Later,Jimmy Cliff,The Best of Jimmy Cliff (1975),https://music.apple.com/il/song/sooner-or-later/1488634636,1488634636
+Mississippi Queen,Mountain,Climbing!,https://music.apple.com/il/song/mississippi-queen/192492200,192492200
+Siberian Khatru,Yes,Close to the Edge,https://music.apple.com/il/song/siberian-khatru/1049014552,1049014552
+The Working Man,Creedence Clearwater Revival,Creedence Clearwater Revival,https://music.apple.com/il/song/the-working-man/1440944906,1440944906
+Just Friends,Pat Martino,El Hombre,https://music.apple.com/il/song/just-friends/1443117328,1443117328
+Breathe,The Prodigy,The Fat of the Land,https://music.apple.com/il/song/breathe/1450124067,1450124067
+Money,The Flying Lizards,The Flying Lizards,https://music.apple.com/il/song/money/714684589,714684589
+Case of the P.T.A.,Leaders Of The New School,A Future Without a Past,https://music.apple.com/il/song/case-of-the-p-t-a/739969729,739969729
+Kool Thing,Sonic Youth,Goo,https://music.apple.com/il/song/kool-thing/1440839413,1440839413
+Graceland,Paul Simon,Graceland,https://music.apple.com/il/song/graceland/529574613,529574613
+Country House,Blur,The Great Escape,https://music.apple.com/il/song/country-house/699810334,699810334
+Intergalactic,Beastie Boys,Hello Nasty (Deluxe Version) [Remastered],https://music.apple.com/il/song/intergalactic/721224385,721224385
+Lay Down,Priestess,Hello Master,https://music.apple.com/il/song/lay-down/303298448,303298448
+La nave del olvido (The Ship of Forgetfulness),Julio Iglesias,Hey!,https://music.apple.com/il/song/la-nave-del-olvido-the-ship-of-forgetfulness/209462428,209462428
+The Number of the Beast,Iron Maiden,The Number of the Beast,https://music.apple.com/il/song/the-number-of-the-beast/979954059,979954059
+Je t'aime moi non plus,Serge Gainsbourg,Jane Birkin & Serge Gainsbourg,https://music.apple.com/il/song/je-taime-moi-non-plus/1443220646,1443220646
+Mother,John Lennon,John Lennon/Plastic Ono Band,https://music.apple.com/il/song/mother/1440858371,1440858371
+Come and Get It (2010 - Remaster),Badfinger,Magic Christian Music,https://music.apple.com/il/song/come-and-get-it-2010-remaster/771782759,771782759
+If You Wanna Get to Heaven,The Ozark Mountain Daredevils,The Ozark Mountain Daredevils,https://music.apple.com/il/song/if-you-wanna-get-to-heaven/1443433530,1443433530
+The Stomp,Ol' Dirty Bastard,Return to the 36 Chambers,https://music.apple.com/il/song/the-stomp/332667394,332667394
+"Train, Train",Blackfoot,Strikes,https://music.apple.com/il/song/train-train/78982133,78982133
+Barracuda,Heart,Little Queen,https://music.apple.com/il/song/barracuda/193520079,193520079
+Only Women Bleed,Alice Cooper,Welcome to My Nightmare,https://music.apple.com/il/song/only-women-bleed/355055240,355055240
+Once Upon a Time in the West,Dire Straits,Communiqué (Remastered),https://music.apple.com/il/song/once-upon-a-time-in-the-west/1440721446,1440721446
+Rock You Like a Hurricane (2015 - Remaster),Scorpions,Love at First Sting,https://music.apple.com/il/song/rock-you-like-a-hurricane-2015-remaster/1494043216,1494043216
+I Wanna Boogie and Woogie with You,The Love Unlimited Orchestra,Let 'Em Dance!,https://music.apple.com/il/song/i-wanna-boogie-and-woogie-with-you/363127296,363127296
+untitled 05 l 09.21.2014.,Kendrick Lamar,untitled unmastered.,https://music.apple.com/il/song/untitled-05-l-09-21-2014/1440844979,1440844979
+Romeo and Juliet,Dire Straits,Making Movies,https://music.apple.com/il/song/romeo-and-juliet/1440566366,1440566366
+Suite: Judy Blue Eyes,"Crosby, Stills & Nash","Crosby, Stills & Nash",https://music.apple.com/il/song/suite-judy-blue-eyes/908303116,908303116
+Act Naturally,The Beatles,Help!,https://music.apple.com/il/song/act-naturally/1441164761,1441164761
+"Hatul, Mifletzet (Remastered)",Rami Fortis,Sipurim Mehakufsa (2015 Remastered),https://music.apple.com/il/song/hatul-mifletzet-remastered/1267344615,1267344615
+Flute Loop,Beastie Boys,Ill Communication,https://music.apple.com/il/song/flute-loop/724772453,724772453
+Binz,Solange,When I Get Home,https://music.apple.com/il/song/binz/1454595849,1454595849
+Babylon Sisters,Steely Dan,Gaucho,https://music.apple.com/il/song/babylon-sisters/1715946511,1715946511
+We Shall Overcome,Joan Baez,Carry It On,https://music.apple.com/il/song/we-shall-overcome/712071086,712071086
+Money (That's What I Want) [Live],John Lennon,Live Peace In Toronto 1969,https://music.apple.com/il/song/money-thats-what-i-want-live/714516085,714516085
+Bani,Susso,Keira,https://music.apple.com/il/song/bani/1611816429,1611816429
+Summer '68,Pink Floyd,Atom Heart Mother,https://music.apple.com/il/song/summer-68/1065975883,1065975883
+כמה נעים,Uri Brauner Kinrot,כמה נעים - Single,https://music.apple.com/il/song/%D7%9B%D7%9E%D7%94-%D7%A0%D7%A2%D7%99%D7%9D/1639999691,1639999691
+סתם,Teapacks,נשיקה לדוד,https://music.apple.com/il/song/%D7%A1%D7%AA%D7%9D/619445364,619445364
+C.R.E.A.M. (Cash Rules Everything Around Me),Wu-Tang Clan,Enter The Wu-Tang (36 Chambers) [Expanded Edition],https://music.apple.com/il/song/c-r-e-a-m-cash-rules-everything-around-me/269843734,269843734
+I'm On My Way,The Proclaimers,Sunshine On Leith,https://music.apple.com/il/song/im-on-my-way/693789492,693789492
+A Horse With No Name,America,America,https://music.apple.com/il/song/a-horse-with-no-name/301027918,301027918
+White Bronco,Action Bronson,White Bronco - Single,https://music.apple.com/il/song/white-bronco/1436365596,1436365596
+La femme d'argent,Air,Moon Safari,https://music.apple.com/il/song/la-femme-dargent/697240265,697240265
+Harvest Moon,Neil Young,Harvest Moon,https://music.apple.com/il/song/harvest-moon/72796838,72796838
+I Shall Be Released,Bob Dylan,"Bob Dylan's Greatest Hits, Vol. 2",https://music.apple.com/il/song/i-shall-be-released/190240696,190240696
+War,Edwin Starr,Involved,https://music.apple.com/il/song/war/1454735131,1454735131
+Whiskey River,Willie Nelson,Shotgun Willie,https://music.apple.com/il/song/whiskey-river/885161085,885161085
+Baby Blue,Badfinger,Straight Up (Remastered),https://music.apple.com/il/song/baby-blue/771784201,771784201
+School's Out,Alice Cooper,Alice Cooper's Greatest Hits,https://music.apple.com/il/song/schools-out/79574389,79574389
+Talk Dirty to Me,Poison,Look What the Cat Dragged In,https://music.apple.com/il/song/talk-dirty-to-me/1442861333,1442861333
+I'd Love to Change the World (Stereo Quad Mix),Ten Years After,A Space in Time (Deluxe Version),https://music.apple.com/il/song/id-love-to-change-the-world-stereo-quad-mix/1629125323,1629125323
+Midnight Rider,The Allman Brothers Band,Idlewild South (Deluxe Edition),https://music.apple.com/il/song/midnight-rider/1469554755,1469554755
+Sing Swan Song,Can,Ege Bamyasi (Remastered),https://music.apple.com/il/song/sing-swan-song/711468745,711468745
+Silver Rocket (2012 Remastered Version),Sonic Youth,Daydream Nation (2012 Remastered Version),https://music.apple.com/il/song/silver-rocket-2012-remastered-version/520504466,520504466
+Sigh,Praful,One Day Deep,https://music.apple.com/il/song/sigh/483853885,483853885
+Sheena Is a Punk Rocker (Single Version),Ramones,Leave Home (40th Anniversary Deluxe Edition),https://music.apple.com/il/song/sheena-is-a-punk-rocker-single-version/1245182546,1245182546
+Scorpio,Dennis Coffey,Absolutely the Best of Dennis Coffey,https://music.apple.com/il/song/scorpio/415657325,415657325
+The Scarecrow,Pink Floyd,The Piper at the Gates of Dawn,https://music.apple.com/il/song/the-scarecrow/1065975056,1065975056
+All the Young Dudes,Mott the Hoople,All the Young Dudes (Expanded Edition),https://music.apple.com/il/song/all-the-young-dudes/155713011,155713011
+Oney,Johnny Cash,Any Old Wind That Blows,https://music.apple.com/il/song/oney/825829170,825829170
+Beautiful Day,Jackie Wilson,Beautiful Day,https://music.apple.com/il/song/beautiful-day/1236939684,1236939684
+California,Joni Mitchell,Blue,https://music.apple.com/il/song/california/1492263128,1492263128
+Smokin',Boston,Boston,https://music.apple.com/il/song/smokin/913902377,913902377
+Things You Used to Do,The Allman Brothers Band,Brothers of the Road,https://music.apple.com/il/song/things-you-used-to-do/304149817,304149817
+Lobo Bobo / Rapaz de Bem / Ideias Erradas / Confissao / Madeira de Lei / Deixa Isso Pra La,Doris Monteiro E Miltinho,"Dóris, Miltinho e Charme",https://music.apple.com/il/song/lobo-bobo-rapaz-de-bem-ideias-erradas-confissao/713764230,713764230
+E.S.P. (2022 Remaster),Miles Davis,E.S.P. (2022 Remaster),https://music.apple.com/il/song/e-s-p-2022-remaster/203773382,203773382
+Down By the River,Neil Young & Crazy Horse,Everybody Knows This Is Nowhere,https://music.apple.com/il/song/down-by-the-river/1015769595,1015769595
+Great Balls Of Fire,Jerry Lee Lewis,Great Balls Of Fire / You Win Again - Single,https://music.apple.com/il/song/great-balls-of-fire/1579139551,1579139551
+Poetry In Motion,Johnny Tillotson,Johnny Tillotson's Best,https://music.apple.com/il/song/poetry-in-motion/1713994013,1713994013
+My Baby Just Cares for Me,Nina Simone,Little Girl Blue (Remastered),https://music.apple.com/il/song/my-baby-just-cares-for-me/1436705565,1436705565
+The Crystal Ship,The Doors,The Doors,https://music.apple.com/il/song/the-crystal-ship/1622368531,1622368531
+La Grange,ZZ Top,Tres Hombres,https://music.apple.com/il/song/la-grange/1728071989,1728071989
+Lodi,Creedence Clearwater Revival,Green River,https://music.apple.com/il/song/lodi/1440952992,1440952992
+Long Time Gone,Dickey Betts,Highway Call,https://music.apple.com/il/song/long-time-gone/1442937508,1442937508
+Loosie,Earl Sweatshirt,Some Rap Songs,https://music.apple.com/il/song/loosie/1442400354,1442400354
+Love Rears Its Ugly Head,Living Colour,Time's Up,https://music.apple.com/il/song/love-rears-its-ugly-head/158439859,158439859
+Lovin' You,Minnie Riperton,Perfect Angel,https://music.apple.com/il/song/lovin-you/1443067813,1443067813
+Maiden Voyage (Live),Herbie Hancock,V.S.O.P. (Live),https://music.apple.com/il/song/maiden-voyage-live/986227635,986227635
+The Makings of You,Curtis Mayfield,Curtis (Expanded Edition),https://music.apple.com/il/song/the-makings-of-you/29168223,29168223
+Mary On A Cross,Ghost,Seven Inches of Satanic Panic - Single,https://music.apple.com/il/song/mary-on-a-cross/1767041431,1767041431
+Maybe Tomorrow,Grant Green,Visions,https://music.apple.com/il/song/maybe-tomorrow/1371788412,1371788412
+Meet Me In the Bottom,Canned Heat,Hooker 'N Heat,https://music.apple.com/il/song/meet-me-in-the-bottom/724261582,724261582
+Morning Has Broken,Cat Stevens,Teaser And The Firecat (2021 Remaster),https://music.apple.com/il/song/morning-has-broken/1586832570,1586832570
+Mother and Child Reunion (with The Jessy Dixon Singers & Urubamba) [Live 1973],Paul Simon,Paul Simon In Concert: Live Rhymin',https://music.apple.com/il/song/mother-and-child-reunion-with-the-jessy-dixon/692881976,692881976
+Muskrat Love,America,Hat Trick,https://music.apple.com/il/song/muskrat-love/150077763,150077763
+Bound (2023 Remaster),Ponderosa Twins Plus One,2+2+1 = (2023 Remaster),https://music.apple.com/il/song/bound-2023-remaster/667023119,667023119
+Breaking the Law,Judas Priest,British Steel (Bonus Track Version),https://music.apple.com/il/song/breaking-the-law/207346225,207346225
+Broken Hearts Are for A******s,Frank Zappa,Sheik Yerbouti,https://music.apple.com/il/song/broken-hearts-are-for-a-s/1440930142,1440930142
+Carry On Wayward Son,Kansas,Leftoverture (Expanded Edition),https://music.apple.com/il/song/carry-on-wayward-son/190655992,190655992
+Changes (2009 Remaster),Black Sabbath,Vol. 4,https://music.apple.com/il/song/changes-2009-remaster/1440228364,1440228364
+Cherub Rock,The Smashing Pumpkins,Siamese Dream,https://music.apple.com/il/song/cherub-rock/721207643,721207643
+Cindy Lou's Wish,"Tyler, The Creator",Music Inspired by Illumination & Dr. Seuss' The Grinch - EP,https://music.apple.com/il/song/cindy-lous-wish/1441586896,1441586896
+Civil War (2022 Remaster),Guns N' Roses,Use Your Illusion II (Deluxe Edition),https://music.apple.com/il/song/civil-war-2022-remaster/1645131110,1645131110
+Cold As Ice,Foreigner,Foreigner (Deluxe Version),https://music.apple.com/il/song/cold-as-ice/309576633,309576633
+Corcovado,Antônio Carlos Jobim,"The Composer of Desafinado, Plays",https://music.apple.com/il/song/corcovado/1469577481,1469577481
+Crazy,Patsy Cline,Patsy Cline's Greatest Hits,https://music.apple.com/il/song/crazy/1440826094,1440826094
+Crosstown Traffic,The Jimi Hendrix Experience,Electric Ladyland,https://music.apple.com/il/song/crosstown-traffic/359528147,359528147
+Cult of Personality (2023 Remaster),Living Colour,Vivid (2023 Remaster),https://music.apple.com/il/song/cult-of-personality-2023-remaster/273290630,273290630
+Dancing with the Moonlit Knight (2007 Stereo Mix),Genesis,Selling England By the Pound (2007 Stereo Mix),https://music.apple.com/il/song/dancing-with-the-moonlit-knight-2007-stereo-mix/294810258,294810258
+Daydream Believer,The Monkees,"The Birds, The Bees & The Monkees (Deluxe Edition)",https://music.apple.com/il/song/daydream-believer/23419779,23419779
+Don't Let Me Be Lonely Tonight,James Taylor,One Man Dog (Remastered),https://music.apple.com/il/song/dont-let-me-be-lonely-tonight/1485664650,1485664650
+Planet Rock,Afrika Bambaataa,Planet Rock,https://music.apple.com/il/song/planet-rock/1604623462,1604623462
+Eruption,Van Halen,Van Halen,https://music.apple.com/il/song/eruption/976820536,976820536
+Fio Maravilha (Ao Vivo),Jorge Ben Jor,Dal Vivo al Sistina,https://music.apple.com/il/song/fio-maravilha-ao-vivo/1070762864,1070762864
+Iron Man (2009 Remaster),Black Sabbath,Paranoid (2009 Remaster),https://music.apple.com/il/song/iron-man-2009-remaster/1440282327,1440282327
+Raining Blood,Slayer,Reign In Blood,https://music.apple.com/il/song/raining-blood/1733769810,1733769810
+Bark at the Moon,Ozzy Osbourne,Bark at the Moon (Bonus Track Version),https://music.apple.com/il/song/bark-at-the-moon/192826926,192826926
+Midlife Crisis,Faith No More,Angel Dust,https://music.apple.com/il/song/midlife-crisis/184673165,184673165
+The Wizard,Black Sabbath,Black Sabbath (Remastered),https://music.apple.com/il/song/the-wizard/1438648679,1438648679
+Thunder Kiss '65,White Zombie,"La Sexorcisto: Devil Music, Vol. 1",https://music.apple.com/il/song/thunder-kiss-65/1440905969,1440905969
+Man On the Silver Mountain,Rainbow,Ritchie Blackmore's Rainbow,https://music.apple.com/il/song/man-on-the-silver-mountain/1440924610,1440924610
+Diamonds And Rust,Joan Baez,Diamonds & Rust,https://music.apple.com/il/song/diamonds-and-rust/1469550556,1469550556
+It Ain't Like That,Alice In Chains,Facelift,https://music.apple.com/il/song/it-aint-like-that/217359030,217359030
+The Seeker,The Who,"Meaty, Beaty, Big and Bouncy",https://music.apple.com/il/song/the-seeker/1440743132,1440743132
+Cliffs of Dover,Eric Johnson,Ah Via Musicom,https://music.apple.com/il/song/cliffs-of-dover/724497085,724497085
+אי ירוק בים,יעל לוי,שיחות סלון,https://music.apple.com/il/song/%D7%90%D7%99-%D7%99%D7%A8%D7%95%D7%A7-%D7%91%D7%99%D7%9D/1466107091,1466107091
+Sweet Caroline,Neil Diamond,Sweet Caroline,https://music.apple.com/il/song/sweet-caroline/1422898880,1422898880
+Bulls On Parade,Rage Against the Machine,Evil Empire,https://music.apple.com/il/song/bulls-on-parade/390538384,390538384
+Psycho Killer ( LP Version ),Talking Heads,Talking Heads: 77,https://music.apple.com/il/song/psycho-killer-lp-version/120135389,120135389
+Ring of Fire,Johnny Cash,Ring Of Fire: The Best Of Johnny Cash,https://music.apple.com/il/song/ring-of-fire/824807545,824807545
+מתוק מתוק,Lehakat Pikud Tzafon,חייך לעולם,https://music.apple.com/il/song/%D7%9E%D7%AA%D7%95%D7%A7-%D7%9E%D7%AA%D7%95%D7%A7/1454530160,1454530160
+Sugar,System Of A Down,System Of A Down (Deluxe),https://music.apple.com/il/song/sugar/1810760511,1810760511
+Sister Golden Hair,America,Hearts,https://music.apple.com/il/song/sister-golden-hair/150058668,150058668
+If You Wanna Be Happy,Trini Lopez,More Trini Lopez At PJ's,https://music.apple.com/il/song/if-you-wanna-be-happy/40285970,40285970
+You're So Vain,Carly Simon,No Secrets,https://music.apple.com/il/song/youre-so-vain/1057307827,1057307827
+Crimson and Clover,Tommy James,Crimson & Clover,https://music.apple.com/il/song/crimson-and-clover/59412471,59412471
+Melissa,The Allman Brothers Band,Eat a Peach,https://music.apple.com/il/song/melissa/1469585322,1469585322
+Midnight Rider,The Allman Brothers Band,Idlewild South,https://music.apple.com/il/song/midnight-rider/1469551206,1469551206
+Sunshine of Your Love (Mono version),Cream,Disraeli Gears (Deluxe Edition),https://music.apple.com/il/song/sunshine-of-your-love-mono-version/1489665757,1489665757
+Amnesia,Chumbawamba,Massive Hits! - Nineties,https://music.apple.com/il/song/amnesia/689344740,689344740
+With a Little Help from My Friends,Joe Cocker,With a Little Help from My Friends,https://music.apple.com/il/song/with-a-little-help-from-my-friends/1434916256,1434916256
+The Revolution Will Not Be Televised,Gil Scott-Heron,Pieces of a Man,https://music.apple.com/il/song/the-revolution-will-not-be-televised/1621384500,1621384500
+When I Paint My Masterpiece,The Band,Cahoots,https://music.apple.com/il/song/when-i-paint-my-masterpiece/1452511192,1452511192
+Green Tangerines and Wild Evergreens,Carl Douglas,Love Peace and Happiness,https://music.apple.com/il/song/green-tangerines-and-wild-evergreens/1618248094,1618248094
+מי מפחד מגברת לוין,Hashlosharim,השלושרים,https://music.apple.com/il/song/%D7%9E%D7%99-%D7%9E%D7%A4%D7%97%D7%93-%D7%9E%D7%92%D7%91%D7%A8%D7%AA-%D7%9C%D7%95%D7%99%D7%9F/1254962582,1254962582
+Touch Me,The Doors,The Soft Parade (50th Anniversary Deluxe Edition),https://music.apple.com/il/song/touch-me/1473335567,1473335567
+In the Morning,Jefferson Airplane,Surrealistic Pillow,https://music.apple.com/il/song/in-the-morning/281811773,281811773
+Proud Mary,Creedence Clearwater Revival,Bayou Country,https://music.apple.com/il/song/proud-mary/1440946827,1440946827
