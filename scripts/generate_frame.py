@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -161,11 +162,34 @@ def load_csv_candidates(path: Path) -> List[Candidate]:
     return rows
 
 
-def select_csv_candidate(rows: List[Candidate]) -> Optional[Candidate]:
+def _first_of_window(count: int, window: int) -> int:
+    """First album index for a shuffled rotation window (deterministic seed)."""
+    order = list(range(count))
+    random.Random(window).shuffle(order)
+    return order[0]
+
+
+def select_csv_candidate(
+    rows: List[Candidate], window: Optional[int] = None
+) -> Optional[Candidate]:
+    """Pick a fallback album using a shuffled order that changes every rotation
+    window. The choice is stable within a window (so repeated generator runs in
+    the same 10-minute slot agree) but consecutive windows land on different
+    albums, and a one-step lookback prevents back-to-back repeats."""
     if not rows:
         return None
-    rotation_seconds = int(os.environ.get("ROTATION_SECONDS", "600"))
-    index = int(time.time() // max(rotation_seconds, 1)) % len(rows)
+    if len(rows) == 1:
+        return rows[0]
+    rotation_seconds = max(int(os.environ.get("ROTATION_SECONDS", "600")), 1)
+    if window is None:
+        window = int(time.time() // rotation_seconds)
+
+    index = _first_of_window(len(rows), window)
+    previous = _first_of_window(len(rows), window - 1)
+    if index == previous:
+        index = _first_of_window(len(rows), window + 0x9E3779B9)
+        if index == previous:
+            index = (previous + 1) % len(rows)
     return rows[index]
 
 

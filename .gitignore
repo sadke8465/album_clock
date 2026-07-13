@@ -1,9 +1,18 @@
 .cache/
 .venv/
 public/
+pack-output/
 __pycache__/
 *.pyc
 .DS_Store
 firmware/.pio/
+firmware/.pio-core/
+.pio-core/
 firmware/.vscode/
 firmware/include/LocalSecrets.h
+
+# Cloudflare Worker
+worker/node_modules/
+worker/.wrangler/
+worker/dist/
+worker/.dev.vars

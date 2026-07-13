@@ -1,0 +1,72 @@
+name: Publish fallback album pack
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "data/albums.csv"
+      - "scripts/build_fallback_pack.py"
+      - "scripts/generate_frame.py"
+      - "requirements.txt"
+      - ".github/workflows/publish-fallback-pack.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: albumclock-fallback-pack
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: python -m pip install -r requirements.txt
+      - run: npm ci
+        working-directory: worker
+      - name: Download previous immutable pack for incremental reuse
+        if: ${{ vars.WORKER_BASE_URL != '' }}
+        run: |
+          if curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}/v1/fallback/current.json" -o /tmp/current.json; then
+            PACK_URL=$(python -c 'import json; print(json.load(open("/tmp/current.json"))["pack_url"])')
+            curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}${PACK_URL}" -o /tmp/previous.acpk
+          fi
+      - name: Build and validate pack
+        run: |
+          if [ -f /tmp/previous.acpk ]; then
+            python scripts/build_fallback_pack.py --previous-pack /tmp/previous.acpk
+          else
+            python scripts/build_fallback_pack.py
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fallback-pack-report
+          path: |
+            pack-output/current.json
+            pack-output/report.json
+      - name: Upload immutable pack and publish manifest last
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          VERSION=$(python -c 'import json; print(json.load(open("../pack-output/current.json"))["version"])')
+          npx wrangler r2 object put "albumclock-frames/fallback/packs/${VERSION}.acpk" --remote --file "../pack-output/fallback-${VERSION}.acpk" --content-type application/octet-stream --cache-control "public, max-age=31536000, immutable"
+          npx wrangler r2 object get "albumclock-frames/fallback/packs/${VERSION}.acpk" --remote --file /tmp/published.acpk
+          test "$(sha256sum /tmp/published.acpk | cut -d' ' -f1)" = "$VERSION"
+          npx wrangler r2 object put "albumclock-frames/fallback/reports/${VERSION}.json" --remote --file ../pack-output/report.json --content-type application/json
+          npx wrangler r2 object put "albumclock-frames/fallback/current.json" --remote --file ../pack-output/current.json --content-type application/json --cache-control no-cache
+      - name: Verify published manifest
+        if: ${{ vars.WORKER_BASE_URL != '' }}
+        run: curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}/v1/fallback/current.json"
