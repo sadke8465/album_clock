@@ -415,20 +415,25 @@ async function fallbackDetail(env:Env,version:string,index:number):Promise<Respo
   const base=await env.FRAMES.get(packKey,{range:{offset:16+header.metadataLength+index*FRAME_BYTES,length:FRAME_BYTES}});
   if(!base)return jsonResponse({error:"detail_unavailable"},{status:404});
   const original=await base.bytes();
-  let url=row.image_url;
-  if(!url){
-    try{
-      const result=asRecord(await fetchJson("https://itunes.apple.com/lookup?id="+id+"&country=il",env,2500));
-      const items=Array.isArray(result?.results)?result.results:[];
-      const match=items.map(asRecord).find(value=>String(value?.trackId)===id);
-      url=stringValue(match?.artworkUrl100).replace("100x100bb","600x600bb");
-    }catch{}
-  }
-  if(!url)return jsonResponse({error:"detail_unavailable"},{status:404});
+  const apple=async(country:string)=>{
+    const result=asRecord(await fetchJson("https://itunes.apple.com/lookup?id="+id+"&country="+country,env,2200));
+    const items=Array.isArray(result?.results)?result.results:[];
+    const match=items.map(asRecord).find(value=>String(value?.trackId)===id);
+    return stringValue(match?.artworkUrl100).replace(/100x100(?:bb)?/,"600x600bb");
+  };
+  // Older entries were originally resolved via MusicBrainz first. Try that
+  // source as well as Apple, but only accept a visually matching rendition.
+  const candidates=row.image_url?[row.image_url]:(await Promise.allSettled([
+    apple("il"),apple("us"),musicbrainzCover(row.artist,row.album,env,2200),
+    deezerCover(row.artist,row.album,env,2200)
+  ])).flatMap(r=>r.status==="fulfilled"&&r.value?[r.value]:[]);
+  const jobs=[...new Set(candidates)].map(async url=>{
+    const image=await fetchImage(url,env,Date.now()+2500);
+    if(!similarCover(original,processToRgb565(image)))throw Error("cover mismatch");
+    return processToRgb565(image,DETAIL_SIZE);
+  });
   try{
-    const image=await fetchImage(url,env,Date.now()+3000);
-    if(!similarCover(original,processToRgb565(image)))return jsonResponse({error:"cover_mismatch"},{status:404});
-    await storeDetail(env,key,processToRgb565(image,DETAIL_SIZE));
+    await storeDetail(env,key,await Promise.any(jobs));
     return serveDetail(env,key);
   }catch{return jsonResponse({error:"detail_unavailable"},{status:404});}
 }
