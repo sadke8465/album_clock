@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, feature/wiim-matrix]
     paths:
       - "firmware/**"
       - "scripts/**"
@@ -31,3 +31,10 @@ jobs:
       - run: python -m pip install -r requirements.txt platformio
       - run: python -m unittest discover -s tests -v
       - run: pio run -d firmware -e waveshare-album-clock -e waveshare-panel-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wiim-matrix-firmware
+          path: |
+            firmware/.pio/build/waveshare-album-clock/firmware.bin
+            firmware/.pio/build/waveshare-album-clock/bootloader.bin
+            firmware/.pio/build/waveshare-album-clock/partitions.bin

@@ -16,6 +16,7 @@
 #include "AlbumClockConfig.h"
 #include "AudioReactive.h"
 #include "PortalPage.h"
+#include "WiimSource.h"
 
 #if __has_include("LocalSecrets.h")
 #include "LocalSecrets.h"
@@ -876,7 +877,7 @@ void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, 
   }
 }
 
-void networkTask(void *) {
+void legacyNetworkTask(void *) {
   uint32_t lastPollAt = 0, lastLegacyAt = 0, fetchedGeneration = 0;
   String etag, knownPack = localPack.version;
   for (;;) {
@@ -960,6 +961,102 @@ void networkTask(void *) {
         pushNetworkEvent(NetworkEventType::Pack, 0, parsed.playing, millis() - requestStarted,
                          reinterpret_cast<uint8_t *>(info), "fallback pack ready");
       } else { delete info; if (error.length()) pushNetworkEvent(NetworkEventType::Error, 0, parsed.playing, millis() - requestStarted, nullptr, error); }
+    }
+    networkBusy = false;
+  }
+}
+
+static bool readServiceJson(const String &path, String &json) {
+  HTTPClient http; WiFiClient plain; WiFiClientSecure secure;
+  if (!beginHttp(http, plain, secure, serviceOrigin + path)) return false;
+  http.setTimeout(12000);
+  bool ok = http.GET() == HTTP_CODE_OK;
+  if (ok) json = http.getString();
+  http.end();
+  return ok;
+}
+
+void networkTask(void *) {
+  uint32_t lastPoll = 0, lastRadioPoll = 0, lastPackCheck = 0, idleSince = 0;
+  uint32_t generation = 0;
+  String shownKey, radioHash, knownPack = localPack.version;
+  RemoteSnapshot pack;
+  bool active = false;
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  for (;;) {
+    NetworkCommand command;
+    bool forced = xQueueReceive(networkCommands, &command, pdMS_TO_TICKS(50)) == pdTRUE;
+    if (WiFi.status() != WL_CONNECTED) continue;
+    uint32_t now = millis();
+    if (!forced && now - lastPoll < STATE_POLL_INTERVAL_MS) continue;
+    lastPoll = now;
+    networkBusy = true;
+    WiimPlayback current = pollWiim();
+    bool recognized = current.kind == WiimKind::Music || current.kind == WiimKind::Radio;
+    if (recognized) { active = true; idleSince = 0; }
+    else if (current.kind == WiimKind::Idle) {
+      if (!idleSince) idleSince = now;
+      if (now - idleSince >= 10000) { active = false; shownKey = ""; }
+    } else idleSince = 0; // Failed reads are not evidence that music stopped.
+    RemoteSnapshot *snapshot = new RemoteSnapshot;
+    snapshot->playing = active;
+    snapshot->playback = active ? "playing" : "idle";
+    snapshot->serviceStatus = current.kind == WiimKind::Unknown ? "WiiM unavailable" : "WiiM connected";
+    snapshot->pendingTitle = current.title;
+    snapshot->generation = generation;
+    pushNetworkEvent(NetworkEventType::State, generation, active, millis()-now,
+                     reinterpret_cast<uint8_t *>(snapshot), "WiiM state");
+    if (current.kind == WiimKind::Music && current.key != shownKey) {
+      uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
+      if (bytes && wiimArtwork(reinterpret_cast<uint16_t *>(bytes))) {
+        // Reject an image fetched while the user was skipping tracks.
+        WiimPlayback confirm = pollWiim();
+        if (confirm.kind == WiimKind::Music && confirm.key == current.key) {
+          shownKey = current.key;
+          latestRequestedGeneration = ++generation;
+          pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "WiiM artwork");
+        } else free(bytes);
+      } else if (bytes) free(bytes);
+    }
+    if (current.kind == WiimKind::Radio && (shownKey != "kan88" || now-lastRadioPoll >= 10000)) {
+      lastRadioPoll = now;
+      String json;
+      if (readServiceJson("/v1/radio/kan88/state", json)) {
+        String hash = jsonStringAt(json, "sha256");
+        if (hash.length() == 64 && (hash != radioHash || shownKey != "kan88")) {
+          uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
+          String error;
+          if (bytes && fetchExactFrame(serviceOrigin + "/v1/frames/" + hash + ".rgb565", hash, bytes, error)) {
+            if (pollWiim().kind == WiimKind::Radio) {
+              radioHash = hash; shownKey = "kan88";
+              latestRequestedGeneration = ++generation;
+              pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "KAN 88 artwork");
+            } else free(bytes);
+          } else if (bytes) free(bytes);
+        }
+      }
+    }
+    if (!active && current.kind == WiimKind::Idle) {
+      if (!lastPackCheck || now-lastPackCheck >= 60000) {
+        lastPackCheck = now;
+        String json;
+        if (readServiceJson("/v1/fallback/current.json", json)) {
+          pack.packVersion = jsonStringAt(json, "version");
+          pack.packPath = jsonStringAt(json, "pack_url");
+          pack.packSize = jsonUIntAt(json, "size");
+          pack.packCount = jsonUIntAt(json, "count");
+          pack.packMetadataLength = jsonUIntAt(json, "metadata_length");
+        }
+      }
+      if (pack.packVersion.length() == 64 && pack.packVersion != knownPack) {
+        PackInstallInfo *info = new PackInstallInfo{};
+        String error;
+        if (downloadFallbackPack(pack, *info, error)) {
+          knownPack = pack.packVersion;
+          pushNetworkEvent(NetworkEventType::Pack, 0, false, millis()-now,
+                           reinterpret_cast<uint8_t *>(info), "fallback pack ready");
+        } else delete info;
+      }
     }
     networkBusy = false;
   }

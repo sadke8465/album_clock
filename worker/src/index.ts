@@ -728,6 +728,88 @@ async function serveCurrentManifest(env: Env): Promise<Response> {
   });
 }
 
+function radioNormalize(value: unknown): string {
+  return stringValue(value).normalize("NFKD").toLowerCase()
+    .replace(/\p{M}/gu, "").replace(/&/g, "and").replace(/[^\p{L}\p{N}]/gu, "");
+}
+
+// Standalone radio endpoint; never consults a user's scrobbles.
+async function kan88State(env: Env): Promise<Response> {
+  const lastKey = "kan88:last-frame:v1";
+  const last = await env.KV.get(lastKey, "json") as JsonRecord | null;
+  const result = (value: JsonRecord | null) => jsonResponse(value ?? { status: "waiting" },
+    { headers: { "cache-control": "no-store" } });
+  try {
+    const response = await fetchWithTimeout("https://www.kan.org.il/api/arc-cloud/get-live-track-data?channelId=4",
+      { headers: { "User-Agent": ua(env), Accept: "application/json" } }, 3500);
+    if (!response.ok || response.status === 204) return result(last);
+    const live = asRecord(await response.json());
+    if (!live) return result(last);
+    const title = stringValue(live.title);
+    const artists = Array.isArray(live.artists) ? live.artists.map(stringValue).filter(Boolean) : [];
+    const start = Date.parse(stringValue(live.startTime)), end = Date.parse(stringValue(live.endTime));
+    const now = Date.now();
+    if (!title || !artists.length || !Number.isFinite(start) || !Number.isFinite(end) ||
+        now > end + 15000 || now < start - 60000) return result(last);
+    const key = "kan88:track:v1:" + await hashBytes(new TextEncoder().encode(
+      [radioNormalize(title), ...artists.map(radioNormalize)].join("|")));
+    const cached = await env.KV.get(key, "json") as JsonRecord | null;
+    if (cached) {
+      if (cached.sha256) {
+        if (last?.sha256 !== cached.sha256) await env.KV.put(lastKey, JSON.stringify(cached));
+        return result(cached);
+      }
+      return result(last);
+    }
+    const matches = (track: unknown, artist: unknown) =>
+      radioNormalize(track) === radioNormalize(title) &&
+      artists.some(a => radioNormalize(a) === radioNormalize(artist));
+    const candidates: { image: string; album: string }[] = [];
+    const term = artists[0] + " " + title;
+    for (const country of ["il", "us", "gb"]) {
+      try {
+        const data = asRecord(await fetchJson("https://itunes.apple.com/search?" +
+          new URLSearchParams({ term, country, entity: "song", limit: "35" }), env, 2200));
+        for (const item of Array.isArray(data?.results) ? data.results : []) {
+          const row = asRecord(item);
+          if (row && matches(row.trackName, row.artistName) && stringValue(row.artworkUrl100))
+            candidates.push({ image: stringValue(row.artworkUrl100).replace("100x100bb", "300x300bb"),
+              album: stringValue(row.collectionName) });
+        }
+        if (candidates.length) break;
+      } catch { /* Try another catalogue. */ }
+    }
+    if (!candidates.length) {
+      try {
+        const data = asRecord(await fetchJson("https://api.deezer.com/search?" +
+          new URLSearchParams({ q: term, limit: "25" }), env, 2200));
+        for (const item of Array.isArray(data?.data) ? data.data : []) {
+          const row = asRecord(item), artist = asRecord(row?.artist), album = asRecord(row?.album);
+          if (row && matches(row.title, artist?.name) && stringValue(album?.cover_medium))
+            candidates.push({ image: stringValue(album?.cover_medium), album: stringValue(album?.title) });
+        }
+      } catch { /* Retain last verified cover. */ }
+    }
+    const compilation = (s: string) => /best of|greatest hits|collection|anthology|compilation/i.test(s);
+    candidates.sort((a,b) => Number(compilation(a.album)) - Number(compilation(b.album)));
+    for (const candidate of candidates.slice(0,3)) {
+      try {
+        const frame = processToRgb565(await fetchImage(candidate.image, env, Date.now() + 2500));
+        const sha256 = await hashBytes(frame);
+        await env.FRAMES.put(`frames/${sha256}.rgb565`, frame, {
+          httpMetadata: { contentType: "application/octet-stream" },
+        });
+        const value = { status: "ready", title, artists, sha256, album: candidate.album };
+        await env.KV.put(key, JSON.stringify(value), { expirationTtl: 2592000 });
+        await env.KV.put(lastKey, JSON.stringify(value));
+        return result(value);
+      } catch { /* Try another matching cover. */ }
+    }
+    await env.KV.put(key, JSON.stringify({ status: "no-match" }), { expirationTtl: 120 });
+  } catch { /* A failed feed must not discard the last radio cover. */ }
+  return result(last);
+}
+
 async function legacyFrame(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const rand = url.searchParams.get("rand");
@@ -792,6 +874,7 @@ export default {
       if (url.pathname === "/v1/fallback/current.json") {
         return serveCurrentManifest(env);
       }
+      if (url.pathname === "/v1/radio/kan88/state") return kan88State(env);
       const frameMatch = url.pathname.match(
         /^\/v1\/frames\/([a-f0-9]{64})\.rgb565$/
       );
