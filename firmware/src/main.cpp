@@ -536,7 +536,7 @@ void setupMatrix() {
 void loadSettings() {
   prefs.begin("album-clock", false);
   wifiSsid = prefs.getString("ssid", "");
-  wifiPass = prefs.getString("pass", "");
+  wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
   frameUrl = prefs.getString("url", DEFAULT_FRAME_URL);
   brightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
   if (brightness < 1) brightness = DEFAULT_BRIGHTNESS;
@@ -1558,9 +1558,9 @@ void setup() {
   delay(40);
   bool forcePortal = digitalRead(RESET_CONFIG_PIN) == LOW;
 
-  if (forcePortal || wifiSsid.length() == 0) {
+  if (forcePortal || wifiSsid.length() == 0 || wifiPass.length() == 0) {
     Serial.println(forcePortal ? "BOOT held -> setup portal"
-                               : "No Wi-Fi saved -> setup portal");
+                               : "Wi-Fi credentials missing -> setup portal");
     startApPortal();
     return;
   }
@@ -1570,10 +1570,10 @@ void setup() {
     Serial.printf("Wi-Fi ok, IP %s\n", WiFi.localIP().toString().c_str());
     startStaServices();
   } else {
-    // Router may just be down. Keep showing cached art and retry in loop;
-    // hold BOOT at power-on if you need the setup portal.
-    Serial.println("Wi-Fi not connected yet; will keep retrying");
-    startStaServices();
+    // Make the settings accessible even when the saved credentials are invalid.
+    Serial.println("Wi-Fi connection failed -> setup portal");
+    startApPortal();
+    return;
   }
   xTaskCreatePinnedToCore(networkTask, "album-network", 12288, nullptr, 1, &networkTaskHandle, 0);
 }
