@@ -43,7 +43,8 @@ small{color:#888}
 <h3>Artwork appearance</h3>
 <small>Applies to WiiM, Kan 88 and random artwork. Changes are saved automatically.</small>
 <div id="imageControls"></div>
-<button onclick="resetImage()">Reset image adjustments</button>
+<button onclick="recommendedImage()">Recommended clean preset</button>
+<button onclick="resetImage()">Reset to original colors</button>
 <h3>Color calibration</h3>
 <label>Panel color order</label>
 <select id="order" onchange="setOrder()">
@@ -84,7 +85,10 @@ var imageFields=[
  ['exposure','Exposure',-100,100,0],['warmth','Warmth',-100,100,0],
  ['tint','Tint (green / magenta)',-100,100,0],['hue','Hue rotation',-180,180,0],
  ['gamma','Midtone brightness (gamma)',50,200,100],['blur','Blur (pixels)',0,4,0],
- ['red','Red gain',50,150,100],['green','Green gain',50,150,100],['blue','Blue gain',50,150,100]
+ ['red','Red gain',50,150,100],['green','Green gain',50,150,100],['blue','Blue gain',50,150,100],
+ ['blackpoint','Black point',0,48,8],['whitepoint','White point',207,255,247],
+ ['blackcut','Black threshold',0,32,8],['whitecut','White threshold',0,32,8],
+ ['shadows','Shadow smoothing',0,100,35],['highlights','Highlight smoothing',0,100,35]
 ],imageBusy=false;
 imageFields.forEach(function(f){
  var label=document.createElement('label'),v=document.createElement('span'),slider=document.createElement('input');
@@ -100,6 +104,7 @@ function sendImage(data){imageBusy=true;timedFetch('/image',{method:'POST',body:
  .catch(function(e){$('st').textContent=e.message;})
  .finally(function(){imageBusy=false;loadStatus();});}
 function resetImage(){var data=new URLSearchParams();data.set('reset','1');sendImage(data);}
+function recommendedImage(){var data=new URLSearchParams();data.set('recommended','1');sendImage(data);}
 function timedFetch(url,options,timeout){var c=new AbortController(),t=setTimeout(function(){c.abort()},timeout||2500);options=options||{};options.signal=c.signal;return fetch(url,options).finally(function(){clearTimeout(t)});}
 function drawFrame(){timedFetch('/frame.bin?t='+Date.now(),{},2500).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
  var d=new DataView(b),ctx=$('c').getContext('2d'),img=ctx.createImageData(64,64),i,v,r,g,bl;

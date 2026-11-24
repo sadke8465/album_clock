@@ -38,7 +38,7 @@ static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
 static ImageAdjustments imageSettings;
-#define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150)
+#define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150) X(blackpoint,0,48) X(whitepoint,207,255) X(blackcut,0,32) X(whitecut,0,32) X(shadows,0,100) X(highlights,0,100)
 
 static String wifiSsid;
 static String wifiPass;
@@ -561,6 +561,15 @@ void loadSettings() {
   prefs.begin("album-clock", false);
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
+  // One-time migration requested for 3.3: install the recommended clean
+  // profile, then retain subsequent remote adjustments on every reboot.
+  if (!prefs.isKey("im_profile") || prefs.getUChar("im_profile",0)!=1) {
+    imageSettings=cleanImagePreset();
+#define SAVE_CLEAN(name,lo,hi) prefs.putShort("im_" #name,imageSettings.name);
+    IMAGE_FIELDS(SAVE_CLEAN)
+#undef SAVE_CLEAN
+    prefs.putUChar("im_profile",1);
+  }
 #define LOAD_IMAGE(name,lo,hi) imageSettings.name = constrain(prefs.getShort("im_" #name, imageSettings.name), lo, hi);
   IMAGE_FIELDS(LOAD_IMAGE)
 #undef LOAD_IMAGE
@@ -1332,9 +1341,10 @@ void handleFrameBin() {
 
 void handleImageAdjustments() {
   if (server.hasArg("reset")) imageSettings = ImageAdjustments{};
+  if (server.hasArg("recommended")) imageSettings = cleanImagePreset();
 #define SET_IMAGE(name,lo,hi) \
   if (server.hasArg(#name)) imageSettings.name = constrain(server.arg(#name).toInt(),lo,hi); \
-  if (server.hasArg(#name) || server.hasArg("reset")) prefs.putShort("im_" #name,imageSettings.name);
+  if (server.hasArg(#name) || server.hasArg("reset") || server.hasArg("recommended")) prefs.putShort("im_" #name,imageSettings.name);
   IMAGE_FIELDS(SET_IMAGE)
 #undef SET_IMAGE
   if (displayMode == 0 && !transition.active) drawFrame();

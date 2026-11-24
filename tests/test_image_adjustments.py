@@ -37,6 +37,29 @@ int main() {
     for(auto &v:original) v=0x8410;
     imageRender(original,out,scratch,a);
     assert(imageR(out[0])>imageB(out[0]));
+    a=cleanImagePreset();
+    memset(original,0,sizeof(original));
+    original[0]=image565(8,8,8);
+    original[1]=image565(247,247,247);
+    original[2]=0xf800;
+    original[3]=0xffff;
+    imageRender(original,out,scratch,a);
+    assert(out[0]==0);
+    assert(out[1]==0xffff);
+    assert(out[2]==0xf800);
+    assert(out[3]==0xffff);
+    a=ImageAdjustments{};
+    a.shadows=100; a.highlights=100;
+    for(auto &v:original) v=image565(16,16,16);
+    original[32*64+32]=image565(40,40,40);
+    original[32*64+33]=0xffff;
+    imageRender(original,out,scratch,a);
+    assert(imageR(out[32*64+32])<imageR(original[32*64+32]));
+    assert(out[32*64+33]==0xffff);
+    for(auto &v:original) v=image565(248,248,248);
+    original[32*64+32]=image565(224,224,224);
+    imageRender(original,out,scratch,a);
+    assert(imageR(out[32*64+32])>=imageR(original[32*64+32]));
 }
 """
         with tempfile.TemporaryDirectory() as d:
