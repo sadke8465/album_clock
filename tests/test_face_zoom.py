@@ -11,8 +11,22 @@ class FaceZoomTests(unittest.TestCase):
         header = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "include"
         source = r"""
 #include "FaceZoom.h"
+#include "SmartRegions.h"
 #include <cassert>
 int main(){
+    FaceCrop tile=faceScanTile(4);
+    assert(tile.x==96&&tile.y==96&&tile.side==160);
+    auto mapped=mapFaceRect({0,0,192,192},tile,192);
+    assert(mapped.x0==96&&mapped.y0==96&&mapped.x1==255&&mapped.y1==255);
+    assert(sameFace({10,10,50,50},{12,12,48,48}));
+    assert(!sameFace({10,10,50,50},{80,80,100,100}));
+    assert(zoomDepthCrop({0,0,192},150).side==128);
+    uint8_t gray[128*128]{};
+    auto blank=analyzeSmartRegions(gray,128);assert(blank.textCount==0);
+    for(int y=10;y<22;y++)for(int x=6;x<58;x++)if((x%6)<3)gray[y*128+x]=255;
+    auto text=analyzeSmartRegions(gray,128);
+    assert(text.textCount>0&&text.text[0].y==0);
+    assert(text.detailOrder[0]==0);
     uint8_t rgb[3];
     faceRgb888(0xf800,rgb);assert(rgb[0]==255&&rgb[1]==0&&rgb[2]==0);
     faceRgb888(0x001f,rgb);assert(rgb[0]==0&&rgb[1]==0&&rgb[2]==255);

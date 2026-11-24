@@ -28,11 +28,17 @@ small{color:#888}
 <canvas id="c" width="64" height="64"></canvas>
 <h3>Smart zoom</h3>
 <label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (Apple Music only)</label>
-<label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces)</label>
+<label><input type="checkbox" id="textzoom" onchange="zoomSetting('text',this.checked?1:0)"> Enable text-region zoom</label>
+<label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces or text)</label>
+<label><input type="checkbox" id="saliency" onchange="zoomSetting('saliency',this.checked?1:0)"> Prioritize visually detailed quadrants</label>
+<label>Face sensitivity: <span id="facesensv">60</span>%</label><input id="facesens" type="range" min="0" max="100" value="60" oninput="$('facesensv').textContent=this.value" onchange="zoomSetting('sensitivity',this.value)">
+<label>Zoom depth: <span id="zoomdepthv">100</span>%</label><input id="zoomdepth" type="range" min="50" max="150" value="100" oninput="$('zoomdepthv').textContent=this.value" onchange="zoomSetting('depth',this.value)">
+<label>Automatic delay: <span id="zoomdelayv">30</span> seconds</label><input id="zoomdelay" type="range" min="1" max="120" value="30" oninput="$('zoomdelayv').textContent=this.value" onchange="zoomSetting('delay',this.value)">
+<label>Hold duration: <span id="zoomholdv">18</span> seconds</label><input id="zoomhold" type="range" min="3" max="60" value="18" oninput="$('zoomholdv').textContent=this.value" onchange="zoomSetting('hold',this.value)">
 <label>Zoom transition: <span id="zoomdurv">3000</span> ms</label><input id="zoomdur" type="range" min="500" max="8000" step="500" value="3000" oninput="$('zoomdurv').textContent=this.value" onchange="setZoomDuration()">
 <small id="faceStatus">Off</small>
-<div class="row"><button id="nextFace" onclick="faceAction('next')">Test / next face</button><button id="nextQuad" onclick="faceAction('nextquad')">Test / next quadrant</button><button id="fullFace" onclick="faceAction('full')">Full cover</button></div>
-<small>Tap the cover preview to cycle detected faces, or quadrants when no faces are available.</small>
+<div class="row"><button id="nextFace" onclick="faceAction('next')">Test / next face</button><button id="nextText" onclick="faceAction('nexttext')">Test / next text</button><button id="nextQuad" onclick="faceAction('nextquad')">Test / next quadrant</button><button id="rescan" onclick="faceAction('rescan')">Rescan cover</button><button id="fullFace" onclick="faceAction('full')">Full cover</button></div>
+<small>Tap the preview to advance faces, text, or detail regions. Text detection locates likely horizontal text bands; it does not read words.</small>
 <div id="summary" class="summary"></div>
 <div class="row">
 <button id="refreshBtn" onclick="act('/refresh',this)">Refresh now</button>
@@ -116,8 +122,9 @@ function faceAction(action){var data=new URLSearchParams();data.set(action,'1');
 function setFaceZoom(){var data=new URLSearchParams();data.set('value',$('facezoom').checked?'1':'0');sendFace(data);}
 function setQuadrantZoom(){var data=new URLSearchParams();data.set('quadrant',$('quadzoom').checked?'1':'0');sendFace(data);}
 function setZoomDuration(){var data=new URLSearchParams();data.set('duration',$('zoomdur').value);sendFace(data);}
+function zoomSetting(name,value){var data=new URLSearchParams();data.set(name,value);sendFace(data);}
 function sendFace(data){timedFetch('/facezoom',{method:'POST',body:data},3000).then(function(r){return r.text().then(function(t){if(!r.ok)throw Error(t);return t})}).then(function(t){$('st').textContent=t;loadStatus();}).catch(function(e){$('faceStatus').textContent=e.message;});}
-$('c').onclick=function(){if(!$('nextFace').disabled)faceAction('next');else if(!$('nextQuad').disabled)faceAction('nextquad');};
+$('c').onclick=function(){if(!$('nextFace').disabled)faceAction('next');else if(!$('nextText').disabled)faceAction('nexttext');else if(!$('nextQuad').disabled)faceAction('nextquad');};
 function timedFetch(url,options,timeout){var c=new AbortController();setTimeout(function(){c.abort()},Math.max(timeout||2500,5000));options=options||{};options.signal=c.signal;return fetch(url,options);}
 function drawFrame(){if(previewBusy||document.hidden)return;previewBusy=true;timedFetch('/frame.bin?t='+Date.now(),{},5000).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
  var d=new DataView(b),ctx=$('c').getContext('2d'),img=ctx.createImageData(64,64),i,v,r,g,bl;
@@ -131,9 +138,12 @@ function loadStatus(){clearTimeout(statusTimer);if(document.hidden||statusBusy){
  var busy=!!(s.network_busy||s.transition_active||s.next_queued||s.zoom_animating),playing=s.playback==='playing';
  $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_apple_music||!s.face_count||s.transition_active;
  $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
- $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&!s.zoom_animating;
+ $('textzoom').checked=!!s.text_enabled;$('saliency').checked=!!s.saliency_enabled;$('nextText').disabled=!s.text_enabled||!s.text_count||s.transition_active;
+ $('rescan').disabled=!!s.face_pending||!s.has_frame;
+ $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&(s.text_index==null||s.text_index<0)&&!s.zoom_animating;
+ [['facesens','face_sensitivity'],['zoomdepth','zoom_depth'],['zoomdelay','zoom_delay'],['zoomhold','zoom_hold']].forEach(function(p){if(document.activeElement.id!==p[0]&&s[p[1]]!=null){$(p[0]).value=s[p[1]];$(p[0]+'v').textContent=s[p[1]];}});
  if(document.activeElement.id!=='zoomdur'&&s.zoom_duration!=null){$('zoomdur').value=s.zoom_duration;$('zoomdurv').textContent=s.zoom_duration;}
- $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled&&s.face_apple_music?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
+ $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled&&!s.text_enabled?'Off':s.face_pending?'Scanning face tiles…':(s.face_enabled&&s.face_apple_music?(s.face_count||0)+' face(s), ':'')+(s.text_enabled?(s.text_count||0)+' text region(s)':'Detail mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.text_index>=0?' — text '+(s.text_index+1)+' / '+s.text_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
  $('summary').innerHTML='<div class="card">Playback<b>'+esc(s.playback||'unknown')+'</b></div><div class="card">Service<b>'+esc(s.service_status||'unknown')+'</b></div><div class="card">Fallback pack<b>'+esc(s.pack_count||0)+' covers</b></div><div class="card">Network<b>'+esc(s.last_network_latency_ms||0)+' ms</b></div>';
  $('nextBtn').disabled=playing||submitting||!s.pack_count;$('nextBtn').title=playing?'Next is available while playback is idle':(!s.pack_count?'Fallback pack is still syncing':'');
  $('refreshBtn').disabled=submitting;

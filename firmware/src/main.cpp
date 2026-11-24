@@ -20,6 +20,7 @@
 #include "PortalPage.h"
 #include "ImageAdjustments.h"
 #include "FaceZoom.h"
+#include "SmartRegions.h"
 #include "human_face_detect_msr01.hpp"
 #include "WiimSource.h"
 
@@ -55,13 +56,16 @@ RTC_NOINIT_ATTR static uint32_t faceInferenceMarker;
 static constexpr uint32_t FACE_BUSY_MAGIC=0xface3410;
 static uint32_t faceArtworkId=0, faceChangedAt=0;
 static uint32_t faceTriedId=0;
-static int faceIndex=-1, faceCount=0, quadrantIndex=-1;
+static int faceIndex=-1, faceCount=0, quadrantIndex=-1,textIndex=-1;
+static bool textEnabled=true, saliencyEnabled=true,regionsReady=false;
+static SmartRegions smartRegions;
+static uint8_t faceSensitivity=60,zoomDepth=100,zoomHold=18,zoomDelay=30;
 static bool zoomAnimating=false;
 static uint32_t zoomStarted=0,zoomLastDraw=0;
 static uint16_t zoomDuration=3000;
 static FaceCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
 static FaceCrop faceCrops[FACE_MAX];
-struct FaceJob { uint32_t id; uint16_t *pixels; int width; uint64_t fingerprint; };
+struct FaceJob { uint32_t id; uint16_t *pixels; int width; uint64_t fingerprint; uint8_t sensitivity; };
 struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; uint64_t fingerprint; bool ran; };
 struct FaceCacheEntry { uint64_t fingerprint; int count; FaceCrop crops[FACE_MAX]; };
 static FaceCacheEntry faceCache[12]{};
@@ -449,29 +453,37 @@ static void runFaceDetection(FaceJob job) {
     }
     uint8_t *rgb=(uint8_t *)heap_caps_malloc(FACE_DETECT_SIZE*FACE_DETECT_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(rgb) {
-      for(int y=0;y<FACE_DETECT_SIZE;y++){
-        for(int x=0;x<FACE_DETECT_SIZE;x++){
-          int i=y*FACE_DETECT_SIZE+x;
-          uint16_t v=faceSample(job.pixels,job.width,job.width,(x+.5f)*job.width/FACE_DETECT_SIZE-.5f,(y+.5f)*job.width/FACE_DETECT_SIZE-.5f);
-          faceRgb888(v,rgb+i*3);
-        }
-        if(y%16==0)vTaskDelay(1);
-      }
-      Serial.printf("Face detection: RGB888 %dpx scale 0.6, heap %u\n",FACE_DETECT_SIZE,ESP.getFreeHeap());
+      uint32_t started=millis();FaceRect boxes[FACE_MAX]{};
+      Serial.printf("Tiled face detection: %dpx, sensitivity %u\n",FACE_DETECT_SIZE,job.sensitivity);
       faceInferenceMarker=FACE_BUSY_MAGIC;
-      for(int pass=0;pass<2&&result.count==0;pass++) {
-        if(pass && (heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<80000 ||
-                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<35000))break;
-        HumanFaceDetectMSR01 detector(0.20F,0.5F,FACE_MAX,pass?0.9F:0.6F);
-        auto &faces=detector.infer(rgb,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
-        result.ran=true;
-        Serial.printf("Face detector raw boxes: %u\n",(unsigned)faces.size());
-        for(const auto &f:faces) {
-          if(f.box.size()<4 || result.count>=FACE_MAX)continue;
-          if(f.box[2]<=f.box[0] || f.box[3]<=f.box[1])continue;
-          FaceCrop crop=faceCrop({f.box[0]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,f.box[1]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,
-            f.box[2]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,f.box[3]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE});
-          result.crops[result.count++]=crop;
+      {
+        HumanFaceDetectMSR01 detector(0.35F-job.sensitivity*0.0025F,0.5F,FACE_MAX,0.75F);
+        for(int pass=0;pass<6&&result.count<FACE_MAX;pass++){
+          if(pass&&(millis()-started>6000||!faceEnabled||job.id!=faceArtworkId||
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<30000))break;
+          FaceCrop tile=faceScanTile(pass);uint32_t total=0;
+          for(int y=0;y<FACE_DETECT_SIZE;y++){
+            for(int x=0;x<FACE_DETECT_SIZE;x++){
+              int i=y*FACE_DETECT_SIZE+x;
+              float scale=job.width/(float)FACE_SOURCE_SIZE;
+              uint16_t v=faceSample(job.pixels,job.width,job.width,(tile.x+(x+.5f)*tile.side/FACE_DETECT_SIZE)*scale-.5f,
+                (tile.y+(y+.5f)*tile.side/FACE_DETECT_SIZE)*scale-.5f);
+              faceRgb888(v,rgb+i*3);total+=(rgb[i*3]+rgb[i*3+1]*2+rgb[i*3+2])/4;
+            }
+            if(y%16==0)vTaskDelay(1);
+          }
+          int mean=total/(FACE_DETECT_SIZE*FACE_DETECT_SIZE);
+          if(mean<75){int gain=100+min(55,75-mean);for(int i=0;i<FACE_DETECT_SIZE*FACE_DETECT_SIZE*3;i++)rgb[i]=min(255,rgb[i]*gain/100);}
+          auto &faces=detector.infer(rgb,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
+          result.ran=true;
+          Serial.printf("Face tile %d: raw boxes %u\n",pass,(unsigned)faces.size());
+          for(const auto &f:faces) {
+            if(f.box.size()<4||result.count>=FACE_MAX||f.box[2]<=f.box[0]||f.box[3]<=f.box[1])continue;
+            FaceRect box=mapFaceRect({f.box[0],f.box[1],f.box[2],f.box[3]},tile,FACE_DETECT_SIZE);
+            bool duplicate=false;for(int i=0;i<result.count;i++)if(sameFace(box,boxes[i])){duplicate=true;break;}
+            if(!duplicate){boxes[result.count]=box;result.crops[result.count++]=faceCrop(box);}
+          }
+          vTaskDelay(1);
         }
       }
       faceInferenceMarker=0;
@@ -486,17 +498,18 @@ static void runFaceDetection(FaceJob job) {
 static void requestFaceDetection() {
   if(!faceReady||!faceEnabled||!faceAppleMusic||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||faceTriedId==faceArtworkId)return;
   faceTriedId=faceArtworkId;
-  for(const auto &cached:faceCache)if(cached.fingerprint==faceFingerprint&&cached.count>0&&cached.count<=FACE_MAX){
+  uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
+  for(const auto &cached:faceCache)if(cached.fingerprint==fingerprint&&cached.count>0&&cached.count<=FACE_MAX){
     faceCount=cached.count;memcpy(faceCrops,cached.crops,sizeof(faceCrops));
     Serial.println("Face locations restored from album cache");return;
   }
-  if(faceLastEmpty==faceFingerprint)return;
+  if(faceLastEmpty==fingerprint)return;
   uint16_t *copy=(uint16_t *)heap_caps_malloc(faceWidth*faceWidth*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!copy)return;
   memcpy(copy,faceSource,faceWidth*faceWidth*2);
   FaceJob old;
   if(xQueueReceive(faceJobs,&old,0)==pdTRUE)free(old.pixels);
-  FaceJob job{faceArtworkId,copy,faceWidth,faceFingerprint};
+  FaceJob job{faceArtworkId,copy,faceWidth,fingerprint,faceSensitivity};
   if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();}else free(copy);
 }
 static void serviceFaceJob(bool musicAllowed) {
@@ -506,12 +519,13 @@ static void serviceFaceJob(bool musicAllowed) {
   else {free(job.pixels);FaceResult result{};result.id=job.id;xQueueOverwrite(faceResults,&result);}
 }
 static void requestArtworkDetail(){
-  if(!detailJobs||faceDetailed||faceDetailRequested||!faceDetailPath.length()||!quadrantEnabled)return;
+  if(!detailJobs||faceDetailed||faceDetailRequested||!faceDetailPath.length()||(!quadrantEnabled&&!textEnabled))return;
   DetailJob job{};job.id=faceArtworkId;strlcpy(job.path,faceDetailPath.c_str(),sizeof(job.path));
   xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;
 }
 static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool appleMusic=false) {
-  ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  smartRegions=SmartRegions{};regionsReady=false;
   zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
   memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
   faceAppleMusic=appleMusic;
@@ -552,26 +566,46 @@ static void serviceCropZoom() {
   }
 }
 static void returnFullCover() {
-  faceIndex=-1;quadrantIndex=-1;faceChangedAt=millis();
+  faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceChangedAt=millis();
   if(faceBaseValid&&faceSource)startCropZoom({0,0,FACE_SOURCE_SIZE});
 }
 static bool advanceFace() {
   if(!faceEnabled||!faceAppleMusic||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
-  quadrantIndex=-1;
+  quadrantIndex=-1;textIndex=-1;
   ++faceIndex;
   if(faceIndex>=faceCount)faceIndex=-1;
-  startCropZoom(faceIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:faceCrops[faceIndex]);
+  startCropZoom(faceIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(faceCrops[faceIndex],zoomDepth));
   faceChangedAt=millis();
   return true;
 }
 static bool advanceQuadrant() {
   if(!quadrantEnabled||!faceBaseValid||!faceSource||transition.active||displayMode!=0||testCard)return false;
-  faceIndex=-1;
+  faceIndex=-1;textIndex=-1;
   ++quadrantIndex;
   if(quadrantIndex>=4)quadrantIndex=-1;
-  startCropZoom(quadrantIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:quadrantCrop(quadrantIndex));
+  startCropZoom(quadrantIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(quadrantCrop(saliencyEnabled?smartRegions.detailOrder[quadrantIndex]:quadrantIndex),zoomDepth));
   faceChangedAt=millis();
   return true;
+}
+static void analyzeCurrentRegions() {
+  if(regionsReady||!faceSource||faceDetailWaiting||(!textEnabled&&!saliencyEnabled))return;
+  regionsReady=true;
+  int n=min(faceWidth,128);
+  uint8_t *gray=(uint8_t *)heap_caps_malloc(n*n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!gray)return;
+  for(int y=0;y<n;y++)for(int x=0;x<n;x++){
+    uint16_t v=faceSource[(y*faceWidth/n)*faceWidth+x*faceWidth/n];
+    gray[y*n+x]=(imageR(v)*77+imageG(v)*150+imageB(v)*29)>>8;
+  }
+  smartRegions=analyzeSmartRegions(gray,n);free(gray);
+  Serial.printf("Smart regions: %d candidate text bands\n",smartRegions.textCount);
+}
+static bool advanceText(){
+  if(!textEnabled||!faceBaseValid||!faceSource||!smartRegions.textCount||transition.active||displayMode!=0||testCard)return false;
+  faceIndex=-1;quadrantIndex=-1;
+  if(++textIndex>=smartRegions.textCount)textIndex=-1;
+  startCropZoom(textIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(smartRegions.text[textIndex],zoomDepth));
+  faceChangedAt=millis();return true;
 }
 static void serviceFaces() {
   if(facePending&&millis()-facePendingAt>20000){
@@ -587,15 +621,17 @@ static void serviceFaces() {
         auto &slot=faceCache[faceCacheCursor++%12];
         slot.fingerprint=result.fingerprint;slot.count=result.count;
         memcpy(slot.crops,result.crops,sizeof(slot.crops));
-        prefs.putBytes("facecache2",faceCache,sizeof(faceCache));
+        prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
       }else if(result.ran)faceLastEmpty=result.fingerprint;
     }
   }
-  if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0)requestFaceDetection();
+  if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0){analyzeCurrentRegions();requestFaceDetection();}
   serviceCropZoom();
-  if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0)?30000UL:18000UL)) {
+  if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0&&textIndex<0)?zoomDelay*1000UL:zoomHold*1000UL)) {
     if(quadrantEnabled&&quadrantIndex>=0)advanceQuadrant();
+    else if(textEnabled&&textIndex>=0)advanceText();
     else if(faceEnabled&&faceCount)advanceFace();
+    else if(textEnabled&&smartRegions.textCount&&(!faceEnabled||!facePending))advanceText();
     else if(quadrantEnabled&&(!faceEnabled||!facePending))advanceQuadrant();
   }
 }
@@ -757,11 +793,16 @@ void setupMatrix() {
 // ---------------------------------------------------------------------------
 void loadSettings() {
   prefs.begin("album-clock", false);
-  if(prefs.getBytesLength("facecache2")==sizeof(faceCache))prefs.getBytes("facecache2",faceCache,sizeof(faceCache));
+  if(prefs.isKey("facecache3")&&prefs.getBytesLength("facecache3")==sizeof(faceCache))prefs.getBytes("facecache3",faceCache,sizeof(faceCache));
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
   faceEnabled=prefs.isKey("facezoom") && prefs.getBool("facezoom",false);
   quadrantEnabled=prefs.isKey("quadzoom") && prefs.getBool("quadzoom",false);
+  textEnabled=prefs.getBool("textzoom",true);saliencyEnabled=prefs.getBool("saliency",true);
+  faceSensitivity=constrain(prefs.getUChar("facesens",60),0,100);
+  zoomDepth=constrain(prefs.getUChar("zoomdepth",100),50,150);
+  zoomHold=constrain(prefs.getUChar("zoomhold",18),3,60);
+  zoomDelay=constrain(prefs.getUChar("zoomdelay",30),1,120);
   zoomDuration=constrain(prefs.isKey("zoomdur")?prefs.getUShort("zoomdur",3000):3000,500,8000);
   // One-time migration requested for 3.3: install the recommended clean
   // profile, then retain subsequent remote adjustments on every reboot.
@@ -1485,6 +1526,7 @@ void processNetworkEvents() {
           if(faceSource)free(faceSource);
           faceSource=event.detail;event.detail=nullptr;faceDetailed=true;faceWidth=FACE_DETAIL_SIZE;
           faceCount=0;faceIndex=-1;facePending=false;
+          regionsReady=false;smartRegions=SmartRegions{};
         }
         requestFaceDetection();
       }
@@ -1571,6 +1613,14 @@ void handleStatus() {
   j += "\"face_recovery\":" + String(faceRecovery?"true":"false") + ",";
   j += "\"quadrant_enabled\":" + String(quadrantEnabled?"true":"false") + ",";
   j += "\"quadrant_index\":" + String(quadrantIndex) + ",";
+  j += "\"text_enabled\":" + String(textEnabled?"true":"false") + ",";
+  j += "\"saliency_enabled\":" + String(saliencyEnabled?"true":"false") + ",";
+  j += "\"text_count\":" + String(smartRegions.textCount) + ",";
+  j += "\"text_index\":" + String(textIndex) + ",";
+  j += "\"face_sensitivity\":" + String(faceSensitivity) + ",";
+  j += "\"zoom_depth\":" + String(zoomDepth) + ",";
+  j += "\"zoom_hold\":" + String(zoomHold) + ",";
+  j += "\"zoom_delay\":" + String(zoomDelay) + ",";
   j += "\"zoom_animating\":" + String(zoomAnimating?"true":"false") + ",";
   j += "\"zoom_duration\":" + String(zoomDuration) + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
@@ -1639,6 +1689,21 @@ void handleFaceZoom() {
   if(server.hasArg("duration")) {
     zoomDuration=constrain(server.arg("duration").toInt(),500,8000);prefs.putUShort("zoomdur",zoomDuration);
   }
+  if(server.hasArg("text")){textEnabled=server.arg("text").toInt()!=0;prefs.putBool("textzoom",textEnabled);if(textEnabled)requestArtworkDetail();else if(textIndex>=0)returnFullCover();}
+  if(server.hasArg("saliency")){saliencyEnabled=server.arg("saliency").toInt()!=0;prefs.putBool("saliency",saliencyEnabled);regionsReady=false;}
+  if(server.hasArg("sensitivity")){faceSensitivity=constrain(server.arg("sensitivity").toInt(),0,100);prefs.putUChar("facesens",faceSensitivity);faceTriedId=0;faceLastEmpty=0;faceCount=0;}
+  if(server.hasArg("depth")){zoomDepth=constrain(server.arg("depth").toInt(),50,150);prefs.putUChar("zoomdepth",zoomDepth);}
+  if(server.hasArg("hold")){zoomHold=constrain(server.arg("hold").toInt(),3,60);prefs.putUChar("zoomhold",zoomHold);}
+  if(server.hasArg("delay")){zoomDelay=constrain(server.arg("delay").toInt(),1,120);prefs.putUChar("zoomdelay",zoomDelay);}
+  if(server.hasArg("rescan")){
+    if(facePending){server.send(409,"text/plain","Face scan already running");return;}
+    uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
+    for(auto &cached:faceCache)if(cached.fingerprint==fingerprint)cached=FaceCacheEntry{};
+    prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
+    faceTriedId=0;faceLastEmpty=0;faceCount=0;regionsReady=false;
+    returnFullCover();
+  }
+  if(server.hasArg("nexttext")&&!advanceText()){server.send(409,"text/plain","No available text regions");return;}
   if(server.hasArg("next")&&!advanceFace()) {
     server.send(409,"text/plain",facePending?"Face detection in progress":(!faceEnabled?"Enable face zoom first":(!faceCount?"No detected faces":"Wait for transition")));
     return;

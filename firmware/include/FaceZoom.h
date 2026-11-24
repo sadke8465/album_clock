@@ -6,6 +6,33 @@
 constexpr int FACE_SOURCE_SIZE=256, FACE_DETAIL_SIZE=512, FACE_DETECT_SIZE=192, FACE_MAX=5;
 struct FaceRect { int x0,y0,x1,y1; };
 struct FaceCrop { int x,y,side; };
+constexpr int TEXT_MAX=4;
+static inline int zoomClamp(int v,int lo,int hi){return v<lo?lo:(v>hi?hi:v);}
+static inline FaceCrop centeredCrop(int x,int y,int side){
+  side=zoomClamp(side,64,256);
+  return {zoomClamp(x-side/2,0,256-side),zoomClamp(y-side/2,0,256-side),side};
+}
+static inline FaceCrop zoomDepthCrop(FaceCrop crop,int percent){
+  if(crop.side==256)return crop;
+  return centeredCrop(crop.x+crop.side/2,crop.y+crop.side/2,crop.side*100/zoomClamp(percent,50,150));
+}
+static inline FaceCrop faceScanTile(int index){
+  if(index==0)return {0,0,256};
+  if(index<=4){int i=index-1;return {(i%2)*96,(i/2)*96,160};}
+  // Additional tightly framed center tile for small faces near boundaries.
+  return {64,64,128};
+}
+static inline FaceRect mapFaceRect(FaceRect box,FaceCrop tile,int input){
+  return {zoomClamp(tile.x+box.x0*tile.side/input,0,255),zoomClamp(tile.y+box.y0*tile.side/input,0,255),
+    zoomClamp(tile.x+box.x1*tile.side/input,0,255),zoomClamp(tile.y+box.y1*tile.side/input,0,255)};
+}
+static inline bool sameFace(FaceRect a,FaceRect b){
+  int x0=a.x0>b.x0?a.x0:b.x0,y0=a.y0>b.y0?a.y0:b.y0;
+  int x1=a.x1<b.x1?a.x1:b.x1,y1=a.y1<b.y1?a.y1:b.y1;
+  int w=x1-x0+1,h=y1-y0+1;if(w<=0||h<=0)return false;
+  int overlap=w*h,aa=(a.x1-a.x0+1)*(a.y1-a.y0+1),bb=(b.x1-b.x0+1)*(b.y1-b.y0+1);
+  return overlap*100>=35*(aa+bb-overlap)||overlap*100>=75*(aa<bb?aa:bb);
+}
 static inline void faceRgb888(uint16_t pixel,uint8_t *out) {
   int r=(pixel>>11)&31,g=(pixel>>5)&63,b=pixel&31;
   out[0]=(r<<3)|(r>>2);out[1]=(g<<2)|(g>>4);out[2]=(b<<3)|(b>>2);
@@ -34,7 +61,7 @@ static inline FaceCrop faceCrop(FaceRect b) {
   int side=(int)ceilf((w>h?w:h)*1.9f);
   if(side<64)side=64;
   if(side>224)side=224;
-  int x=(b.x0+b.x1+1-side)/2,y=(b.y0+b.y1+1-side)/2;
+  int x=(b.x0+b.x1+1-side)/2,y=(b.y0+b.y1+1-side)/2-h/10;
   if(x<0)x=0;if(y<0)y=0;
   if(x+side>FACE_SOURCE_SIZE)x=FACE_SOURCE_SIZE-side;
   if(y+side>FACE_SOURCE_SIZE)y=FACE_SOURCE_SIZE-side;
