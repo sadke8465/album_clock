@@ -73,7 +73,12 @@ static bool wiimRead(const char *path, uint8_t *buffer, size_t capacity, size_t 
 }
 
 enum class WiimKind { Unknown, Idle, Music, Radio };
-struct WiimPlayback { WiimKind kind = WiimKind::Unknown; String key, title; };
+struct WiimPlayback {
+  WiimKind kind;
+  String key, title;
+  WiimPlayback(WiimKind k = WiimKind::Unknown, String id = "", String name = "")
+    : kind(k), key(id), title(name) {}
+};
 static bool meaningful(String s) {
   s.trim(); s.toLowerCase();
   return s.length() && s != "unknow" && s != "unknown" && s != "null";
@@ -104,7 +109,7 @@ static WiimPlayback pollWiim() {
   if (state != "play") return {WiimKind::Idle, "", ""};
   if (!wiimRead("/httpapi.asp?command=getMetaInfo", body, sizeof(body), n) ||
       deserializeJson(metadata, body, n)) return {};
-  auto meta = metadata["metaData"];
+  JsonObjectConst meta = metadata["metaData"].as<JsonObjectConst>();
   String title = meta["title"] | "", artist = meta["artist"] | "", album = meta["album"] | "";
   String statusTitle = decodeWiimHex(status["Title"] | "");
   String statusArtist = decodeWiimHex(status["Artist"] | "");

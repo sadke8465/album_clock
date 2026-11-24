@@ -116,7 +116,7 @@ struct LocalPackState {
 };
 
 struct TransitionState {
-  bool active = false, wasRadio = false;
+  bool active = false;
   bool haveOld = false;
   uint32_t generation = 0;
   uint32_t startedAt = 0;
@@ -981,7 +981,7 @@ void networkTask(void *) {
   uint32_t generation = 0;
   String shownKey, radioHash, knownPack = localPack.version;
   RemoteSnapshot pack;
-  bool active = false;
+  bool active = false, wasRadio = false;
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   for (;;) {
     NetworkCommand command;
