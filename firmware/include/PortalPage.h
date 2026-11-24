@@ -26,11 +26,13 @@ small{color:#888}
 </style></head><body>
 <h1>Album Clock</h1>
 <canvas id="c" width="64" height="64"></canvas>
-<h3>Face zoom</h3>
+<h3>Smart zoom</h3>
 <label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom</label>
+<label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces)</label>
+<label>Zoom transition: <span id="zoomdurv">3000</span> ms</label><input id="zoomdur" type="range" min="500" max="8000" step="500" value="3000" oninput="$('zoomdurv').textContent=this.value" onchange="setZoomDuration()">
 <small id="faceStatus">Off</small>
-<div class="row"><button id="nextFace" onclick="faceAction('next')">Test / next face</button><button id="fullFace" onclick="faceAction('full')">Full cover</button></div>
-<small>Tap the cover preview to zoom to the first face, then cycle through other detected faces.</small>
+<div class="row"><button id="nextFace" onclick="faceAction('next')">Test / next face</button><button id="nextQuad" onclick="faceAction('nextquad')">Test / next quadrant</button><button id="fullFace" onclick="faceAction('full')">Full cover</button></div>
+<small>Tap the cover preview to cycle detected faces, or quadrants when no faces are available.</small>
 <div id="summary" class="summary"></div>
 <div class="row">
 <button id="refreshBtn" onclick="act('/refresh',this)">Refresh now</button>
@@ -112,8 +114,10 @@ function resetImage(){var data=new URLSearchParams();data.set('reset','1');sendI
 function recommendedImage(){var data=new URLSearchParams();data.set('recommended','1');sendImage(data);}
 function faceAction(action){var data=new URLSearchParams();data.set(action,'1');sendFace(data);}
 function setFaceZoom(){var data=new URLSearchParams();data.set('value',$('facezoom').checked?'1':'0');sendFace(data);}
+function setQuadrantZoom(){var data=new URLSearchParams();data.set('quadrant',$('quadzoom').checked?'1':'0');sendFace(data);}
+function setZoomDuration(){var data=new URLSearchParams();data.set('duration',$('zoomdur').value);sendFace(data);}
 function sendFace(data){timedFetch('/facezoom',{method:'POST',body:data},3000).then(function(r){return r.text().then(function(t){if(!r.ok)throw Error(t);return t})}).then(function(t){$('st').textContent=t;loadStatus();}).catch(function(e){$('faceStatus').textContent=e.message;});}
-$('c').onclick=function(){if($('facezoom').checked)faceAction('next');};
+$('c').onclick=function(){if(!$('nextFace').disabled)faceAction('next');else if(!$('nextQuad').disabled)faceAction('nextquad');};
 function timedFetch(url,options,timeout){var c=new AbortController(),t=setTimeout(function(){c.abort()},timeout||2500);options=options||{};options.signal=c.signal;return fetch(url,options).finally(function(){clearTimeout(t)});}
 function drawFrame(){timedFetch('/frame.bin?t='+Date.now(),{},2500).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
  var d=new DataView(b),ctx=$('c').getContext('2d'),img=ctx.createImageData(64,64),i,v,r,g,bl;
@@ -124,14 +128,16 @@ function drawFrame(){timedFetch('/frame.bin?t='+Date.now(),{},2500).then(functio
 function esc(v){return String(v==null?'':v).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
 function loadStatus(){clearTimeout(statusTimer);timedFetch('/status',{},2200).then(function(r){if(!r.ok)throw Error('status '+r.status);return r.json()}).then(function(s){
  $('st').textContent=JSON.stringify(s,null,2);
- var busy=!!(s.network_busy||s.transition_active||s.next_queued),playing=s.playback==='playing';
+ var busy=!!(s.network_busy||s.transition_active||s.next_queued||s.zoom_animating),playing=s.playback==='playing';
  $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_count||s.transition_active;
- $('fullFace').disabled=s.face_index==null||s.face_index<0;
- $('faceStatus').textContent=!s.face_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_count||0)+' face(s) detected'+(s.face_index>=0?' — zoom '+(s.face_index+1)+' / '+s.face_count:' — full cover')+(s.face_detailed?' — high resolution':' — 64×64 source');
+ $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
+ $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&!s.zoom_animating;
+ if(document.activeElement.id!=='zoomdur'&&s.zoom_duration!=null){$('zoomdur').value=s.zoom_duration;$('zoomdurv').textContent=s.zoom_duration;}
+ $('faceStatus').textContent=!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+(s.face_detailed?' — high resolution':' — 64×64 source');
  $('summary').innerHTML='<div class="card">Playback<b>'+esc(s.playback||'unknown')+'</b></div><div class="card">Service<b>'+esc(s.service_status||'unknown')+'</b></div><div class="card">Fallback pack<b>'+esc(s.pack_count||0)+' covers</b></div><div class="card">Network<b>'+esc(s.last_network_latency_ms||0)+' ms</b></div>';
  $('nextBtn').disabled=playing||submitting||!s.pack_count;$('nextBtn').title=playing?'Next is available while playback is idle':(!s.pack_count?'Fallback pack is still syncing':'');
  $('refreshBtn').disabled=submitting;
- if(s.display_generation!==lastGeneration){lastGeneration=s.display_generation;drawFrame();}
+ if(s.display_generation!==lastGeneration||s.zoom_animating){lastGeneration=s.display_generation;drawFrame();}
  if(document.activeElement.id!=='ssid'&&!$('ssid').value)$('ssid').value=s.ssid||'';
  if(document.activeElement.id!=='url'&&!$('url').value)$('url').value=s.frame_url||'';
  if(document.activeElement.id!=='bright'){$('bright').value=s.brightness;$('bval').textContent=s.brightness;}

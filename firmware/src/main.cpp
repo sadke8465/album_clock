@@ -41,11 +41,15 @@ static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
 static ImageAdjustments imageSettings;
-static bool faceEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
-static uint16_t faceBase[4096], faceZoomFrame[4096];
+static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
+static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
 static uint32_t faceArtworkId=0, faceChangedAt=0;
-static int faceIndex=-1, faceCount=0;
+static int faceIndex=-1, faceCount=0, quadrantIndex=-1;
+static bool zoomAnimating=false;
+static uint32_t zoomStarted=0,zoomLastDraw=0;
+static uint16_t zoomDuration=3000;
+static FaceCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
 static FaceCrop faceCrops[FACE_MAX];
 struct FaceJob { uint32_t id; uint16_t *pixels; };
 struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; };
@@ -458,7 +462,8 @@ static void requestFaceDetection() {
   if(xQueueSend(faceJobs,&job,0)==pdTRUE)facePending=true;else free(copy);
 }
 static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr) {
-  ++faceArtworkId;faceIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
   memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
   if(faceSource)free(faceSource);
   faceSource=detail;faceDetailed=detail!=nullptr;
@@ -468,15 +473,43 @@ static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr) {
   }
   requestFaceDetection();
 }
+static void startCropZoom(FaceCrop target) {
+  zoomFrom=currentCrop;zoomTo=target;zoomStarted=millis();zoomLastDraw=0;zoomAnimating=true;
+}
+static void serviceCropZoom() {
+  if(!zoomAnimating||!faceSource||transition.active||displayMode!=0||testCard)return;
+  uint32_t now=millis();
+  if(zoomLastDraw&&now-zoomLastDraw<TRANSITION_FRAME_MS)return;
+  zoomLastDraw=now;
+  float t=(now-zoomStarted)/(float)zoomDuration;
+  currentCrop=interpolateCrop(zoomFrom,zoomTo,t);
+  if(t>=1&&currentCrop.side==FACE_SOURCE_SIZE)memcpy(frame,faceBase,FRAME_BYTES);
+  else faceResize(faceSource,FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,frame,64,currentCrop);
+  memcpy(compositeFrame,frame,FRAME_BYTES);
+  drawFrame();
+  if(t>=1) {
+    zoomAnimating=false;displayGeneration=++nextDisplayGeneration;faceChangedAt=now;
+  }
+}
+static void returnFullCover() {
+  faceIndex=-1;quadrantIndex=-1;faceChangedAt=millis();
+  if(faceBaseValid&&faceSource)startCropZoom({0,0,FACE_SOURCE_SIZE});
+}
 static bool advanceFace() {
   if(!faceEnabled||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
+  quadrantIndex=-1;
   ++faceIndex;
   if(faceIndex>=faceCount)faceIndex=-1;
-  if(faceIndex<0)startTransition(faceBase,++nextDisplayGeneration);
-  else {
-    faceResize(faceSource,FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,faceZoomFrame,64,faceCrops[faceIndex]);
-    startTransition(faceZoomFrame,++nextDisplayGeneration);
-  }
+  startCropZoom(faceIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:faceCrops[faceIndex]);
+  faceChangedAt=millis();
+  return true;
+}
+static bool advanceQuadrant() {
+  if(!quadrantEnabled||!faceBaseValid||!faceSource||transition.active||displayMode!=0||testCard)return false;
+  faceIndex=-1;
+  ++quadrantIndex;
+  if(quadrantIndex>=4)quadrantIndex=-1;
+  startCropZoom(quadrantIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:quadrantCrop(quadrantIndex));
   faceChangedAt=millis();
   return true;
 }
@@ -488,7 +521,12 @@ static void serviceFaces() {
       memcpy(faceCrops,result.crops,sizeof(faceCrops));faceChangedAt=millis();
     }
   }
-  if(faceEnabled&&faceCount&&millis()-faceChangedAt>=(faceIndex<0?30000UL:18000UL))advanceFace();
+  serviceCropZoom();
+  if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0)?30000UL:18000UL)) {
+    if(quadrantEnabled&&quadrantIndex>=0)advanceQuadrant();
+    else if(faceEnabled&&faceCount)advanceFace();
+    else if(quadrantEnabled&&(!faceEnabled||!facePending))advanceQuadrant();
+  }
 }
 
 void serviceTransition() {
@@ -651,6 +689,8 @@ void loadSettings() {
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
   faceEnabled=prefs.isKey("facezoom") && prefs.getBool("facezoom",false);
+  quadrantEnabled=prefs.isKey("quadzoom") && prefs.getBool("quadzoom",false);
+  zoomDuration=constrain(prefs.isKey("zoomdur")?prefs.getUShort("zoomdur",3000):3000,500,8000);
   // One-time migration requested for 3.3: install the recommended clean
   // profile, then retain subsequent remote adjustments on every reboot.
   if (!prefs.isKey("im_profile") || prefs.getUChar("im_profile",0)!=1) {
@@ -1407,6 +1447,10 @@ void handleStatus() {
   j += "\"face_count\":" + String(faceCount) + ",";
   j += "\"face_index\":" + String(faceIndex) + ",";
   j += "\"face_detailed\":" + String(faceDetailed?"true":"false") + ",";
+  j += "\"quadrant_enabled\":" + String(quadrantEnabled?"true":"false") + ",";
+  j += "\"quadrant_index\":" + String(quadrantIndex) + ",";
+  j += "\"zoom_animating\":" + String(zoomAnimating?"true":"false") + ",";
+  j += "\"zoom_duration\":" + String(zoomDuration) + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
   j += "\"audio_rms\":" + String((int)audio::rms()) + ",";
   j += "\"has_frame\":" + String(hasFrame ? "true" : "false") + ",";
@@ -1460,16 +1504,26 @@ void handleFaceZoom() {
       faceEnabled=enabled;prefs.putBool("facezoom",faceEnabled);
       if(enabled) { if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);else requestFaceDetection();faceChangedAt=millis(); }
       else {
-        if(faceIndex>=0&&faceBaseValid)startTransition(faceBase,++nextDisplayGeneration);
-        faceIndex=-1;
+        if(faceIndex>=0&&faceBaseValid)returnFullCover();
       }
     }
+  }
+  if(server.hasArg("quadrant")) {
+    quadrantEnabled=server.arg("quadrant").toInt()!=0;prefs.putBool("quadzoom",quadrantEnabled);
+    if(!quadrantEnabled&&quadrantIndex>=0)returnFullCover();
+    faceChangedAt=millis();
+  }
+  if(server.hasArg("duration")) {
+    zoomDuration=constrain(server.arg("duration").toInt(),500,8000);prefs.putUShort("zoomdur",zoomDuration);
   }
   if(server.hasArg("next")&&!advanceFace()) {
     server.send(409,"text/plain",facePending?"Face detection in progress":(!faceEnabled?"Enable face zoom first":(!faceCount?"No detected faces":"Wait for transition")));
     return;
   }
-  if(server.hasArg("full")&&faceBaseValid) {faceIndex=-1;faceChangedAt=millis();startTransition(faceBase,++nextDisplayGeneration);}
+  if(server.hasArg("nextquad")&&!advanceQuadrant()) {
+    server.send(409,"text/plain",!quadrantEnabled?"Enable quadrant zoom first":"Wait for artwork / transition");return;
+  }
+  if(server.hasArg("full"))returnFullCover();
   server.send(200,"text/plain","Face zoom updated");
 }
 

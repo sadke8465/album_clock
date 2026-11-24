@@ -6,6 +6,24 @@
 constexpr int FACE_SOURCE_SIZE=256, FACE_MAX=5;
 struct FaceRect { int x0,y0,x1,y1; };
 struct FaceCrop { int x,y,side; };
+// Gentle 1.33x zoom, clockwise around the artwork's four corners.
+static inline FaceCrop quadrantCrop(int index) {
+  constexpr int side=192, edge=FACE_SOURCE_SIZE-side;
+  switch(index%4) {
+    case 0:return {0,0,side};
+    case 1:return {edge,0,side};
+    case 2:return {edge,edge,side};
+    default:return {0,edge,side};
+  }
+}
+static inline FaceCrop interpolateCrop(FaceCrop a,FaceCrop b,float t) {
+  if(t<0)t=0;if(t>1)t=1;
+  t=t*t*(3-2*t);
+  FaceCrop c{(int)lroundf(a.x+(b.x-a.x)*t),(int)lroundf(a.y+(b.y-a.y)*t),(int)lroundf(a.side+(b.side-a.side)*t)};
+  if(c.x+c.side>FACE_SOURCE_SIZE)c.x=FACE_SOURCE_SIZE-c.side;
+  if(c.y+c.side>FACE_SOURCE_SIZE)c.y=FACE_SOURCE_SIZE-c.side;
+  return c;
+}
 // Center a square crop on the face, with breathing room around it.
 static inline FaceCrop faceCrop(FaceRect b) {
   int w=b.x1-b.x0+1,h=b.y1-b.y0+1;
