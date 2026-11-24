@@ -125,22 +125,27 @@ static WiimPlayback pollWiim() {
   return {WiimKind::Idle, "", ""};
 }
 
-struct WiimJpegTarget { uint16_t *frame; int side, left, top; };
+struct WiimJpegTarget { uint16_t *frame, *detail; int side, left, top; };
 static WiimJpegTarget wiimJpegTarget;
-static int drawWiimJpeg(JPEGDRAW *draw) {
+static void drawWiimTarget(JPEGDRAW *draw,uint16_t *target,int size) {
   auto &t = wiimJpegTarget;
-  for (int y = 0; y < 64; ++y) {
-    int sy = t.top + ((2*y+1)*t.side)/128;
+  if(!target)return;
+  for (int y = 0; y < size; ++y) {
+    int sy = t.top + ((2*y+1)*t.side)/(2*size);
     if (sy < draw->y || sy >= draw->y + draw->iHeight) continue;
-    for (int x = 0; x < 64; ++x) {
-      int sx = t.left + ((2*x+1)*t.side)/128;
+    for (int x = 0; x < size; ++x) {
+      int sx = t.left + ((2*x+1)*t.side)/(2*size);
       if (sx >= draw->x && sx < draw->x + draw->iWidthUsed)
-        t.frame[y*64+x] = draw->pPixels[(sy-draw->y)*draw->iWidth + sx-draw->x];
+        target[y*size+x] = draw->pPixels[(sy-draw->y)*draw->iWidth + sx-draw->x];
     }
   }
+}
+static int drawWiimJpeg(JPEGDRAW *draw) {
+  drawWiimTarget(draw,wiimJpegTarget.frame,64);
+  drawWiimTarget(draw,wiimJpegTarget.detail,256);
   return 1;
 }
-static bool wiimArtwork(uint16_t *frame) {
+static bool wiimArtwork(uint16_t *frame,uint16_t *detail=nullptr) {
   constexpr size_t limit = 2*1024*1024;
   uint8_t *bytes = (uint8_t *)heap_caps_malloc(limit, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!bytes) return false;
@@ -149,8 +154,9 @@ static bool wiimArtwork(uint16_t *frame) {
   JPEGDEC *jpeg = new JPEGDEC;
   if (ok && jpeg->openRAM(bytes, n, drawWiimJpeg)) {
     int w = jpeg->getWidth(), h = jpeg->getHeight(), side = min(w,h);
-    wiimJpegTarget = {frame, side, (w-side)/2, (h-side)/2};
+    wiimJpegTarget = {frame,detail,side,(w-side)/2,(h-side)/2};
     memset(frame, 0, 8192);
+    if(detail)memset(detail,0,256*256*2);
     jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
     ok = side > 0 && side <= 4096 && jpeg->decode(0,0,0);
     jpeg->close();

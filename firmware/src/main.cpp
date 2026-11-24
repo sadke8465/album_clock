@@ -17,6 +17,9 @@
 #include "AudioReactive.h"
 #include "PortalPage.h"
 #include "ImageAdjustments.h"
+#include "FaceZoom.h"
+#include "human_face_detect_msr01.hpp"
+#include "human_face_detect_mnp01.hpp"
 #include "WiimSource.h"
 
 #if __has_include("LocalSecrets.h")
@@ -38,6 +41,16 @@ static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
 static ImageAdjustments imageSettings;
+static bool faceEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
+static uint16_t faceBase[4096], faceZoomFrame[4096];
+static uint16_t *faceSource=nullptr;
+static uint32_t faceArtworkId=0, faceChangedAt=0;
+static int faceIndex=-1, faceCount=0;
+static FaceCrop faceCrops[FACE_MAX];
+struct FaceJob { uint32_t id; uint16_t *pixels; };
+struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; };
+static QueueHandle_t faceJobs=nullptr, faceResults=nullptr;
+static TaskHandle_t faceTask=nullptr;
 #define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150) X(blackpoint,0,48) X(whitepoint,207,255) X(blackcut,0,32) X(whitecut,0,32) X(shadows,0,100) X(highlights,0,100)
 
 static String wifiSsid;
@@ -88,6 +101,7 @@ struct NetworkEvent {
   uint32_t latencyMs;
   uint8_t *data;
   char message[96];
+  uint16_t *detail;
 };
 
 struct RemoteSnapshot {
@@ -402,6 +416,81 @@ void startTransition(const uint16_t *target, uint32_t generation) {
   }
 }
 
+// Only face location detection, no recognition or identity lookup. Run off
+// the display loop; obsolete results are discarded by artwork generation.
+void faceDetectionTask(void *) {
+  HumanFaceDetectMSR01 first(0.1F,0.5F,10,0.2F);
+  HumanFaceDetectMNP01 second(0.5F,0.3F,FACE_MAX);
+  for(;;) {
+    FaceJob job;
+    if(xQueueReceive(faceJobs,&job,portMAX_DELAY)!=pdTRUE) continue;
+    FaceResult result{};result.id=job.id;
+    uint8_t *bgr=(uint8_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(bgr) {
+      for(int i=0;i<FACE_SOURCE_SIZE*FACE_SOURCE_SIZE;i++){
+        bgr[i*3]=imageB(job.pixels[i]);bgr[i*3+1]=imageG(job.pixels[i]);bgr[i*3+2]=imageR(job.pixels[i]);
+      }
+      auto &candidates=first.infer(bgr,{FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,3});
+      auto &faces=second.infer(bgr,{FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,3},candidates);
+      for(const auto &f:faces) {
+        if(f.box.size()<4 || result.count>=FACE_MAX)continue;
+        if(f.box[2]<=f.box[0] || f.box[3]<=f.box[1])continue;
+        FaceCrop crop=faceCrop({f.box[0],f.box[1],f.box[2],f.box[3]});
+        if(crop.side>=FACE_SOURCE_SIZE)continue;
+        result.crops[result.count++]=crop;
+      }
+      free(bgr);
+    }
+    free(job.pixels);
+    xQueueOverwrite(faceResults,&result);
+    vTaskDelay(1);
+  }
+}
+static void requestFaceDetection() {
+  if(!faceEnabled||!faceSource||!faceJobs||!faceResults)return;
+  if(!faceTask && xTaskCreatePinnedToCore(faceDetectionTask,"face-detect",16384,nullptr,1,&faceTask,0)!=pdPASS) return;
+  uint16_t *copy=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!copy)return;
+  memcpy(copy,faceSource,FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2);
+  FaceJob old;
+  if(xQueueReceive(faceJobs,&old,0)==pdTRUE)free(old.pixels);
+  FaceJob job{faceArtworkId,copy};
+  if(xQueueSend(faceJobs,&job,0)==pdTRUE)facePending=true;else free(copy);
+}
+static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr) {
+  ++faceArtworkId;faceIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
+  if(faceSource)free(faceSource);
+  faceSource=detail;faceDetailed=detail!=nullptr;
+  if(!faceSource) {
+    faceSource=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(faceSource)faceResize(source,64,64,faceSource,FACE_SOURCE_SIZE,{0,0,64});
+  }
+  requestFaceDetection();
+}
+static bool advanceFace() {
+  if(!faceEnabled||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
+  ++faceIndex;
+  if(faceIndex>=faceCount)faceIndex=-1;
+  if(faceIndex<0)startTransition(faceBase,++nextDisplayGeneration);
+  else {
+    faceResize(faceSource,FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,faceZoomFrame,64,faceCrops[faceIndex]);
+    startTransition(faceZoomFrame,++nextDisplayGeneration);
+  }
+  faceChangedAt=millis();
+  return true;
+}
+static void serviceFaces() {
+  if(faceResults) {
+    FaceResult result;
+    if(xQueueReceive(faceResults,&result,0)==pdTRUE && result.id==faceArtworkId) {
+      facePending=false;faceCount=result.count;
+      memcpy(faceCrops,result.crops,sizeof(faceCrops));faceChangedAt=millis();
+    }
+  }
+  if(faceEnabled&&faceCount&&millis()-faceChangedAt>=(faceIndex<0?30000UL:18000UL))advanceFace();
+}
+
 void serviceTransition() {
   if (!transition.active || displayMode != 0) return;
   uint32_t now = millis();
@@ -561,6 +650,7 @@ void loadSettings() {
   prefs.begin("album-clock", false);
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
+  faceEnabled=prefs.isKey("facezoom") && prefs.getBool("facezoom",false);
   // One-time migration requested for 3.3: install the recommended clean
   // profile, then retain subsequent remote adjustments on every reboot.
   if (!prefs.isKey("im_profile") || prefs.getUChar("im_profile",0)!=1) {
@@ -631,7 +721,7 @@ void persistFrame() {
   if (fsMutex && xSemaphoreTake(fsMutex, pdMS_TO_TICKS(250)) != pdTRUE) return;
   File f = LittleFS.open(FRAME_CACHE_TEMP_PATH, "w");
   if (!f) { if (fsMutex) xSemaphoreGive(fsMutex); return; }
-  size_t written = f.write(reinterpret_cast<uint8_t *>(frame), FRAME_BYTES);
+  size_t written = f.write(reinterpret_cast<uint8_t *>(faceBaseValid?faceBase:frame), FRAME_BYTES);
   f.flush();
   f.close();
   if (written == FRAME_BYTES) {
@@ -903,10 +993,12 @@ bool downloadFallbackPack(const RemoteSnapshot &state, PackInstallInfo &installe
 }
 
 void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, uint32_t latency,
-                      uint8_t *data, const String &message) {
-  NetworkEvent event{type, generation, playing, latency, data, {0}};
+                      uint8_t *data, const String &message,uint16_t *detail=nullptr) {
+  NetworkEvent event{type, generation, playing, latency, data, {0},detail};
   strlcpy(event.message, message.c_str(), sizeof(event.message));
-  if (xQueueSend(networkEvents, &event, pdMS_TO_TICKS(50)) != pdTRUE && data) {
+  if (xQueueSend(networkEvents, &event, pdMS_TO_TICKS(50)) != pdTRUE) {
+    if(detail)free(detail);
+    if(!data)return;
     if (type == NetworkEventType::State) delete reinterpret_cast<RemoteSnapshot *>(data);
     else if (type == NetworkEventType::Pack) delete reinterpret_cast<PackInstallInfo *>(data);
     else free(data);
@@ -1044,15 +1136,16 @@ void networkTask(void *) {
                      reinterpret_cast<uint8_t *>(snapshot), "WiiM state");
     if (current.kind == WiimKind::Music && current.key != shownKey) {
       uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
-      if (bytes && wiimArtwork(reinterpret_cast<uint16_t *>(bytes))) {
+      uint16_t *detail=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+      if (bytes && wiimArtwork(reinterpret_cast<uint16_t *>(bytes),detail)) {
         // Reject an image fetched while the user was skipping tracks.
         WiimPlayback confirm = pollWiim();
         if (confirm.kind == WiimKind::Music && confirm.key == current.key) {
           shownKey = current.key;
           latestRequestedGeneration = ++generation;
-          pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "WiiM artwork");
-        } else free(bytes);
-      } else if (bytes) free(bytes);
+          pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "WiiM artwork",detail);
+        } else {free(bytes);free(detail);}
+      } else {free(bytes);free(detail);}
     }
     if (current.kind == WiimKind::Radio && (!wasRadio || now-lastRadioPoll >= 10000)) {
       lastRadioPoll = now;
@@ -1201,6 +1294,7 @@ bool beginNextFallback(bool manual) {
   prefs.putUShort("packcursor", localPack.cursor);
   prefs.putUShort("packlast", localPack.lastIndex);
   lastFallbackAt = millis();
+  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging));
   startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
   lastResult = "local fallback ready";
   return true;
@@ -1229,10 +1323,13 @@ void processNetworkEvents() {
         lastRemoteGeneration = event.generation;
         lastFrameAt = millis();
         lastByteCount = FRAME_BYTES;
+        setFaceArtwork(reinterpret_cast<const uint16_t *>(event.data),event.detail);
+        event.detail=nullptr;
         startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration);
         lastResult = event.message;
       }
       if (event.data) free(event.data);
+      if(event.detail)free(event.detail);
     } else if (event.type == NetworkEventType::Pack) {
       if (event.data) {
         PackInstallInfo *info = reinterpret_cast<PackInstallInfo *>(event.data);
@@ -1305,6 +1402,11 @@ void handleStatus() {
   j += "\"desat\":" + String(desatPct) + ",";
   j += "\"gamma\":" + String(gammaOn ? "true" : "false") + ",";
   j += "\"display_mode\":" + String(displayMode) + ",";
+  j += "\"face_enabled\":" + String(faceEnabled?"true":"false") + ",";
+  j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
+  j += "\"face_count\":" + String(faceCount) + ",";
+  j += "\"face_index\":" + String(faceIndex) + ",";
+  j += "\"face_detailed\":" + String(faceDetailed?"true":"false") + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
   j += "\"audio_rms\":" + String((int)audio::rms()) + ",";
   j += "\"has_frame\":" + String(hasFrame ? "true" : "false") + ",";
@@ -1349,6 +1451,26 @@ void handleImageAdjustments() {
 #undef SET_IMAGE
   if (displayMode == 0 && !transition.active) drawFrame();
   server.send(200,"text/plain","Image adjustments saved");
+}
+
+void handleFaceZoom() {
+  if(server.hasArg("value")) {
+    bool enabled=server.arg("value").toInt()!=0;
+    if(enabled!=faceEnabled) {
+      faceEnabled=enabled;prefs.putBool("facezoom",faceEnabled);
+      if(enabled) { if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);else requestFaceDetection();faceChangedAt=millis(); }
+      else {
+        if(faceIndex>=0&&faceBaseValid)startTransition(faceBase,++nextDisplayGeneration);
+        faceIndex=-1;
+      }
+    }
+  }
+  if(server.hasArg("next")&&!advanceFace()) {
+    server.send(409,"text/plain",facePending?"Face detection in progress":(!faceEnabled?"Enable face zoom first":(!faceCount?"No detected faces":"Wait for transition")));
+    return;
+  }
+  if(server.hasArg("full")&&faceBaseValid) {faceIndex=-1;faceChangedAt=millis();startTransition(faceBase,++nextDisplayGeneration);}
+  server.send(200,"text/plain","Face zoom updated");
 }
 
 void applyBrightness(uint8_t value) {
@@ -1521,6 +1643,7 @@ void setupRoutes() {
   server.on("/testcard", HTTP_POST, handleTestCard);
   server.on("/fade", HTTP_POST, handleFade);
   server.on("/image", HTTP_POST, handleImageAdjustments);
+  server.on("/facezoom", HTTP_POST, handleFaceZoom);
   server.on("/mode", HTTP_POST, handleMode);
   server.on("/refresh", HTTP_POST, handleRefresh);
   server.on("/next", HTTP_POST, handleNext);
@@ -1588,12 +1711,15 @@ void setup() {
   fsMutex = xSemaphoreCreateMutex();
   networkCommands = xQueueCreate(1, sizeof(NetworkCommand));
   networkEvents = xQueueCreate(6, sizeof(NetworkEvent));
+  faceJobs=xQueueCreate(1,sizeof(FaceJob));
+  faceResults=xQueueCreate(1,sizeof(FaceResult));
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
   }
   loadLocalPack();
   if (loadCachedFrame()) {
     hasFrame = true;
+    setFaceArtwork(frame);
     memcpy(compositeFrame, frame, FRAME_BYTES);
     if (fadeEnabled) {
       memcpy(staging, frame, FRAME_BYTES);
@@ -1636,11 +1762,13 @@ void loop() {
     dnsServer.processNextRequest();
     server.handleClient();
     serviceTransition();
+    serviceFaces();
     return;
   }
 
   processNetworkEvents();
   serviceTransition();
+  serviceFaces();
   if (cachePending && !transition.active) { cachePending = false; persistFrame(); }
 
   if (displayMode == 1) {
