@@ -116,7 +116,7 @@ struct LocalPackState {
 };
 
 struct TransitionState {
-  bool active = false;
+  bool active = false, wasRadio = false;
   bool haveOld = false;
   uint32_t generation = 0;
   uint32_t startedAt = 0;
@@ -1018,7 +1018,7 @@ void networkTask(void *) {
         } else free(bytes);
       } else if (bytes) free(bytes);
     }
-    if (current.kind == WiimKind::Radio && (shownKey != "kan88" || now-lastRadioPoll >= 10000)) {
+    if (current.kind == WiimKind::Radio && (!wasRadio || now-lastRadioPoll >= 10000)) {
       lastRadioPoll = now;
       String json;
       if (readServiceJson("/v1/radio/kan88/state", json)) {
@@ -1036,6 +1036,7 @@ void networkTask(void *) {
         }
       }
     }
+    wasRadio = current.kind == WiimKind::Radio;
     if (!active && current.kind == WiimKind::Idle) {
       if (!lastPackCheck || now-lastPackCheck >= 60000) {
         lastPackCheck = now;

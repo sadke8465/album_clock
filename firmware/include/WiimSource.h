@@ -112,7 +112,7 @@ static WiimPlayback pollWiim() {
   if (wiimRadioTitle(statusTitle))
     return {WiimKind::Radio, "kan88", title};
   if (wiimRadioTitle(title) && !meaningful(statusTitle))
-    return {WiimKind::Unknown, "", ""};
+    return {WiimKind::Idle, "", ""};
   String mode = status["mode"] | "";
   if (mode == "1" && title == statusTitle && artist == statusArtist && album == statusAlbum &&
       meaningful(title) && meaningful(artist) && meaningful(album))

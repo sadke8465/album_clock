@@ -761,9 +761,14 @@ async function kan88State(env: Env): Promise<Response> {
       }
       return result(last);
     }
+    const bareTitle = (value: unknown) => radioNormalize(stringValue(value)
+      .replace(/\s*[\[(](?:\d{4}\s*)?(?:remaster(?:ed)?|original mix|mono|stereo)(?:\s+\d{4})?[\])]/gi, ""));
+    const bareArtist = (value: unknown) => radioNormalize(stringValue(value)
+      .replace(/\s+(?:and|&)\s+(?:his|her|their|the)\s+(?:orchestra|band|ensemble|quartet|trio)$/i, ""));
     const matches = (track: unknown, artist: unknown) =>
-      radioNormalize(track) === radioNormalize(title) &&
-      artists.some(a => radioNormalize(a) === radioNormalize(artist));
+      (radioNormalize(track) === radioNormalize(title) || bareTitle(track) === bareTitle(title)) &&
+      artists.some(a => radioNormalize(a) === radioNormalize(artist) ||
+        (radioNormalize(track) === radioNormalize(title) && bareArtist(a).length >= 5 && bareArtist(a) === bareArtist(artist)));
     const candidates: { image: string; album: string }[] = [];
     const term = artists[0] + " " + title;
     for (const country of ["il", "us", "gb"]) {
@@ -787,6 +792,30 @@ async function kan88State(env: Env): Promise<Response> {
           const row = asRecord(item), artist = asRecord(row?.artist), album = asRecord(row?.album);
           if (row && matches(row.title, artist?.name) && stringValue(album?.cover_medium))
             candidates.push({ image: stringValue(album?.cover_medium), album: stringValue(album?.title) });
+        }
+      } catch { /* Retain last verified cover. */ }
+    }
+    if (!candidates.length) {
+      try {
+        const quote = (value: string) => value.replace(/[\\"]/g, "\\$&");
+        const q = new URLSearchParams({ query: 'recording:"' + quote(title) + '" AND artist:"' + quote(artists[0]) + '"',
+          fmt: "json", limit: "8" });
+        const data = asRecord(await fetchJson("https://musicbrainz.org/ws/2/recording/?" + q, env, 2200));
+        for (const item of Array.isArray(data?.recordings) ? data.recordings : []) {
+          const rec = asRecord(item);
+          const credits = Array.isArray(rec?.["artist-credit"]) ? rec["artist-credit"] : [];
+          const artist = credits.map(value => {
+            const credit = asRecord(value);
+            return stringValue(credit?.name) + stringValue(credit?.joinphrase);
+          }).join("");
+          if (!matches(rec?.title, artist)) continue;
+          for (const item of (Array.isArray(rec?.releases) ? rec.releases : []).slice(0, 4)) {
+            const release = asRecord(item), id = stringValue(release?.id);
+            if (/^[0-9a-f-]{36}$/.test(id)) candidates.push({
+              image: "https://coverartarchive.org/release/" + id + "/front-250",
+              album: stringValue(release?.title),
+            });
+          }
         }
       } catch { /* Retain last verified cover. */ }
     }
