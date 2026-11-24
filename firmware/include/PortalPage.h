@@ -27,7 +27,7 @@ small{color:#888}
 <h1>Album Clock</h1>
 <canvas id="c" width="64" height="64"></canvas>
 <h3>Smart zoom</h3>
-<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom</label>
+<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (Apple Music only)</label>
 <label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces)</label>
 <label>Zoom transition: <span id="zoomdurv">3000</span> ms</label><input id="zoomdur" type="range" min="500" max="8000" step="500" value="3000" oninput="$('zoomdurv').textContent=this.value" onchange="setZoomDuration()">
 <small id="faceStatus">Off</small>
@@ -129,11 +129,11 @@ function esc(v){return String(v==null?'':v).replace(/[&<>]/g,function(c){return 
 function loadStatus(){clearTimeout(statusTimer);if(document.hidden||statusBusy){statusTimer=setTimeout(loadStatus,5000);return;}statusBusy=true;timedFetch('/status',{},5000).then(function(r){if(!r.ok)throw Error('status '+r.status);return r.json()}).then(function(s){
  $('st').textContent=JSON.stringify(s,null,2);
  var busy=!!(s.network_busy||s.transition_active||s.next_queued||s.zoom_animating),playing=s.playback==='playing';
- $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_count||s.transition_active;
+ $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_apple_music||!s.face_count||s.transition_active;
  $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
  $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&!s.zoom_animating;
  if(document.activeElement.id!=='zoomdur'&&s.zoom_duration!=null){$('zoomdur').value=s.zoom_duration;$('zoomdurv').textContent=s.zoom_duration;}
- $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
+ $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled&&s.face_apple_music?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
  $('summary').innerHTML='<div class="card">Playback<b>'+esc(s.playback||'unknown')+'</b></div><div class="card">Service<b>'+esc(s.service_status||'unknown')+'</b></div><div class="card">Fallback pack<b>'+esc(s.pack_count||0)+' covers</b></div><div class="card">Network<b>'+esc(s.last_network_latency_ms||0)+' ms</b></div>';
  $('nextBtn').disabled=playing||submitting||!s.pack_count;$('nextBtn').title=playing?'Next is available while playback is idle':(!s.pack_count?'Fallback pack is still syncing':'');
  $('refreshBtn').disabled=submitting;
