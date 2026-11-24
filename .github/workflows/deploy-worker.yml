@@ -3,7 +3,7 @@ name: Deploy album clock Worker
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/wiim-matrix]
     paths:
       - "worker/**"
       - "data/albums.csv"
@@ -44,3 +44,4 @@ jobs:
         run: |
           curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}/health"
           curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}/v1/status"
+          curl --fail --silent --show-error "${{ vars.WORKER_BASE_URL }}/v1/radio/kan88/state"
