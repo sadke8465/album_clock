@@ -6,6 +6,10 @@
 constexpr int FACE_SOURCE_SIZE=256, FACE_DETAIL_SIZE=512, FACE_DETECT_SIZE=192, FACE_MAX=5;
 struct FaceRect { int x0,y0,x1,y1; };
 struct FaceCrop { int x,y,side; };
+static inline void faceRgb888(uint16_t pixel,uint8_t *out) {
+  int r=(pixel>>11)&31,g=(pixel>>5)&63,b=pixel&31;
+  out[0]=(r<<3)|(r>>2);out[1]=(g<<2)|(g>>4);out[2]=(b<<3)|(b>>2);
+}
 // Gentle 1.33x zoom, clockwise around the artwork's four corners.
 static inline FaceCrop quadrantCrop(int index) {
   constexpr int side=192, edge=FACE_SOURCE_SIZE-side;

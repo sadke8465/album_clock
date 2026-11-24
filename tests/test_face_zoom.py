@@ -13,6 +13,9 @@ class FaceZoomTests(unittest.TestCase):
 #include "FaceZoom.h"
 #include <cassert>
 int main(){
+    uint8_t rgb[3];
+    faceRgb888(0xf800,rgb);assert(rgb[0]==255&&rgb[1]==0&&rgb[2]==0);
+    faceRgb888(0x001f,rgb);assert(rgb[0]==0&&rgb[1]==0&&rgb[2]==255);
     FaceCrop c=faceCrop({0,0,25,25});
     assert(c.x==0 && c.y==0 && c.side==64);
     c=faceCrop({227,220,255,255});

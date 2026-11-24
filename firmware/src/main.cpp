@@ -435,26 +435,29 @@ void startTransition(const uint16_t *target, uint32_t generation) {
 // the display loop; obsolete results are discarded by artwork generation.
 void faceDetectionTask(void *) {
   faceInferenceMarker=FACE_BUSY_MAGIC;
-  HumanFaceDetectMSR01 first(0.25F,0.5F,FACE_MAX,0.2F);
+  // The legacy SDK applies resize_scale internally. 0.2 reduced the 192px
+  // input to roughly 38px; use a meaningful inference resolution instead.
+  HumanFaceDetectMSR01 first(0.25F,0.5F,FACE_MAX,0.6F);
   faceInferenceMarker=0;
   for(;;) {
     FaceJob job;
     if(xQueueReceive(faceJobs,&job,portMAX_DELAY)!=pdTRUE) continue;
     FaceResult result{};result.id=job.id;
-    uint8_t *bgr=(uint8_t *)heap_caps_malloc(FACE_DETECT_SIZE*FACE_DETECT_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    if(bgr) {
+    uint8_t *rgb=(uint8_t *)heap_caps_malloc(FACE_DETECT_SIZE*FACE_DETECT_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(rgb) {
       for(int y=0;y<FACE_DETECT_SIZE;y++){
         for(int x=0;x<FACE_DETECT_SIZE;x++){
           int i=y*FACE_DETECT_SIZE+x;
           uint16_t v=faceSample(job.pixels,job.width,job.width,(x+.5f)*job.width/FACE_DETECT_SIZE-.5f,(y+.5f)*job.width/FACE_DETECT_SIZE-.5f);
-          bgr[i*3]=imageB(v);bgr[i*3+1]=imageG(v);bgr[i*3+2]=imageR(v);
+          faceRgb888(v,rgb+i*3);
         }
         if(y%16==0)vTaskDelay(1);
       }
-      Serial.printf("Face detection: start %dpx, heap %u\n",FACE_DETECT_SIZE,ESP.getFreeHeap());
+      Serial.printf("Face detection: RGB888 %dpx scale 0.6, heap %u\n",FACE_DETECT_SIZE,ESP.getFreeHeap());
       faceInferenceMarker=FACE_BUSY_MAGIC;
-      auto &faces=first.infer(bgr,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
+      auto &faces=first.infer(rgb,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
       faceInferenceMarker=0;
+      Serial.printf("Face detector raw boxes: %u\n",(unsigned)faces.size());
       for(const auto &f:faces) {
         if(f.box.size()<4 || result.count>=FACE_MAX)continue;
         if(f.box[2]<=f.box[0] || f.box[3]<=f.box[1])continue;
@@ -462,7 +465,7 @@ void faceDetectionTask(void *) {
           f.box[2]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,f.box[3]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE});
         result.crops[result.count++]=crop;
       }
-      free(bgr);
+      free(rgb);
       Serial.printf("Face detection: %d result(s)\n",result.count);
     }
     free(job.pixels);
