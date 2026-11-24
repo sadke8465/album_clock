@@ -11,6 +11,8 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <esp_attr.h>
 #include <mbedtls/sha256.h>
 
 #include "AlbumClockConfig.h"
@@ -19,7 +21,6 @@
 #include "ImageAdjustments.h"
 #include "FaceZoom.h"
 #include "human_face_detect_msr01.hpp"
-#include "human_face_detect_mnp01.hpp"
 #include "WiimSource.h"
 
 #if __has_include("LocalSecrets.h")
@@ -44,6 +45,13 @@ static ImageAdjustments imageSettings;
 static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
+static int faceWidth=64;
+static bool faceRecovery=false, faceReady=false;
+static uint32_t facePendingAt=0;
+static String faceDetailPath;
+static bool faceDetailRequested=false,faceDetailWaiting=false;
+RTC_NOINIT_ATTR static uint32_t faceInferenceMarker;
+static constexpr uint32_t FACE_BUSY_MAGIC=0xface3410;
 static uint32_t faceArtworkId=0, faceChangedAt=0;
 static int faceIndex=-1, faceCount=0, quadrantIndex=-1;
 static bool zoomAnimating=false;
@@ -51,8 +59,10 @@ static uint32_t zoomStarted=0,zoomLastDraw=0;
 static uint16_t zoomDuration=3000;
 static FaceCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
 static FaceCrop faceCrops[FACE_MAX];
-struct FaceJob { uint32_t id; uint16_t *pixels; };
+struct FaceJob { uint32_t id; uint16_t *pixels; int width; };
 struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; };
+struct DetailJob { uint32_t id; char path[128]; };
+static QueueHandle_t detailJobs=nullptr;
 static QueueHandle_t faceJobs=nullptr, faceResults=nullptr;
 static TaskHandle_t faceTask=nullptr;
 #define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150) X(blackpoint,0,48) X(whitepoint,207,255) X(blackcut,0,32) X(whitecut,0,32) X(shadows,0,100) X(highlights,0,100)
@@ -97,7 +107,7 @@ extern const uint8_t rootca_crt_bundle_start[]
 
 enum class NetworkCommandType : uint8_t { Refresh };
 struct NetworkCommand { NetworkCommandType type; };
-enum class NetworkEventType : uint8_t { State, Frame, Pack, Error };
+enum class NetworkEventType : uint8_t { State, Frame, Pack, Error, Detail };
 struct NetworkEvent {
   NetworkEventType type;
   uint32_t generation;
@@ -106,6 +116,7 @@ struct NetworkEvent {
   uint8_t *data;
   char message[96];
   uint16_t *detail;
+  char detailPath[128];
 };
 
 struct RemoteSnapshot {
@@ -423,27 +434,36 @@ void startTransition(const uint16_t *target, uint32_t generation) {
 // Only face location detection, no recognition or identity lookup. Run off
 // the display loop; obsolete results are discarded by artwork generation.
 void faceDetectionTask(void *) {
-  HumanFaceDetectMSR01 first(0.1F,0.5F,10,0.2F);
-  HumanFaceDetectMNP01 second(0.5F,0.3F,FACE_MAX);
+  faceInferenceMarker=FACE_BUSY_MAGIC;
+  HumanFaceDetectMSR01 first(0.25F,0.5F,FACE_MAX,0.2F);
+  faceInferenceMarker=0;
   for(;;) {
     FaceJob job;
     if(xQueueReceive(faceJobs,&job,portMAX_DELAY)!=pdTRUE) continue;
     FaceResult result{};result.id=job.id;
-    uint8_t *bgr=(uint8_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    uint8_t *bgr=(uint8_t *)heap_caps_malloc(FACE_DETECT_SIZE*FACE_DETECT_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(bgr) {
-      for(int i=0;i<FACE_SOURCE_SIZE*FACE_SOURCE_SIZE;i++){
-        bgr[i*3]=imageB(job.pixels[i]);bgr[i*3+1]=imageG(job.pixels[i]);bgr[i*3+2]=imageR(job.pixels[i]);
+      for(int y=0;y<FACE_DETECT_SIZE;y++){
+        for(int x=0;x<FACE_DETECT_SIZE;x++){
+          int i=y*FACE_DETECT_SIZE+x;
+          uint16_t v=faceSample(job.pixels,job.width,job.width,(x+.5f)*job.width/FACE_DETECT_SIZE-.5f,(y+.5f)*job.width/FACE_DETECT_SIZE-.5f);
+          bgr[i*3]=imageB(v);bgr[i*3+1]=imageG(v);bgr[i*3+2]=imageR(v);
+        }
+        if(y%16==0)vTaskDelay(1);
       }
-      auto &candidates=first.infer(bgr,{FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,3});
-      auto &faces=second.infer(bgr,{FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,3},candidates);
+      Serial.printf("Face detection: start %dpx, heap %u\n",FACE_DETECT_SIZE,ESP.getFreeHeap());
+      faceInferenceMarker=FACE_BUSY_MAGIC;
+      auto &faces=first.infer(bgr,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
+      faceInferenceMarker=0;
       for(const auto &f:faces) {
         if(f.box.size()<4 || result.count>=FACE_MAX)continue;
         if(f.box[2]<=f.box[0] || f.box[3]<=f.box[1])continue;
-        FaceCrop crop=faceCrop({f.box[0],f.box[1],f.box[2],f.box[3]});
-        if(crop.side>=FACE_SOURCE_SIZE)continue;
+        FaceCrop crop=faceCrop({f.box[0]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,f.box[1]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,
+          f.box[2]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE,f.box[3]*FACE_SOURCE_SIZE/FACE_DETECT_SIZE});
         result.crops[result.count++]=crop;
       }
       free(bgr);
+      Serial.printf("Face detection: %d result(s)\n",result.count);
     }
     free(job.pixels);
     xQueueOverwrite(faceResults,&result);
@@ -451,27 +471,35 @@ void faceDetectionTask(void *) {
   }
 }
 static void requestFaceDetection() {
-  if(!faceEnabled||!faceSource||!faceJobs||!faceResults)return;
-  if(!faceTask && xTaskCreatePinnedToCore(faceDetectionTask,"face-detect",16384,nullptr,1,&faceTask,0)!=pdPASS) return;
-  uint16_t *copy=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!faceReady||!faceEnabled||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending)return;
+  if(!faceTask && xTaskCreatePinnedToCore(faceDetectionTask,"face-detect",16384,nullptr,0,&faceTask,0)!=pdPASS) return;
+  uint16_t *copy=(uint16_t *)heap_caps_malloc(faceWidth*faceWidth*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!copy)return;
-  memcpy(copy,faceSource,FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2);
+  memcpy(copy,faceSource,faceWidth*faceWidth*2);
   FaceJob old;
   if(xQueueReceive(faceJobs,&old,0)==pdTRUE)free(old.pixels);
-  FaceJob job{faceArtworkId,copy};
-  if(xQueueSend(faceJobs,&job,0)==pdTRUE)facePending=true;else free(copy);
+  FaceJob job{faceArtworkId,copy,faceWidth};
+  if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();}else free(copy);
 }
-static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr) {
+static void requestArtworkDetail(){
+  if(!detailJobs||faceDetailed||faceDetailRequested||!faceDetailPath.length()||(!faceEnabled&&!quadrantEnabled))return;
+  DetailJob job{};job.id=faceArtworkId;strlcpy(job.path,faceDetailPath.c_str(),sizeof(job.path));
+  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;
+}
+static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="") {
   ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
   zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
   memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
   if(faceSource)free(faceSource);
   faceSource=detail;faceDetailed=detail!=nullptr;
+  faceWidth=detail?FACE_DETAIL_SIZE:64;
+  faceDetailPath=path;faceDetailRequested=false;faceDetailWaiting=false;
   if(!faceSource) {
-    faceSource=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    if(faceSource)faceResize(source,64,64,faceSource,FACE_SOURCE_SIZE,{0,0,64});
+    faceSource=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(faceSource)memcpy(faceSource,source,FRAME_BYTES);
   }
-  requestFaceDetection();
+  requestArtworkDetail();
+  if(!faceDetailWaiting)requestFaceDetection();
 }
 static void startCropZoom(FaceCrop target) {
   zoomFrom=currentCrop;zoomTo=target;zoomStarted=millis();zoomLastDraw=0;zoomAnimating=true;
@@ -484,7 +512,13 @@ static void serviceCropZoom() {
   float t=(now-zoomStarted)/(float)zoomDuration;
   currentCrop=interpolateCrop(zoomFrom,zoomTo,t);
   if(t>=1&&currentCrop.side==FACE_SOURCE_SIZE)memcpy(frame,faceBase,FRAME_BYTES);
-  else faceResize(faceSource,FACE_SOURCE_SIZE,FACE_SOURCE_SIZE,frame,64,currentCrop);
+  else if(t>=1)faceResizeClean(faceSource,faceWidth,frame,64,currentCrop);
+  else {
+    int scale=faceWidth;
+    FaceCrop sourceCrop{currentCrop.x*scale/FACE_SOURCE_SIZE,currentCrop.y*scale/FACE_SOURCE_SIZE,
+      max(1,currentCrop.side*scale/FACE_SOURCE_SIZE)};
+    faceResize(faceSource,faceWidth,faceWidth,frame,64,sourceCrop);
+  }
   memcpy(compositeFrame,frame,FRAME_BYTES);
   drawFrame();
   if(t>=1) {
@@ -514,6 +548,10 @@ static bool advanceQuadrant() {
   return true;
 }
 static void serviceFaces() {
+  if(facePending&&millis()-facePendingAt>20000){
+    facePending=false;faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
+    Serial.println("Face detector timed out, disabled for stability");
+  }
   if(faceResults) {
     FaceResult result;
     if(xQueueReceive(faceResults,&result,0)==pdTRUE && result.id==faceArtworkId) {
@@ -1033,8 +1071,9 @@ bool downloadFallbackPack(const RemoteSnapshot &state, PackInstallInfo &installe
 }
 
 void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, uint32_t latency,
-                      uint8_t *data, const String &message,uint16_t *detail=nullptr) {
-  NetworkEvent event{type, generation, playing, latency, data, {0},detail};
+                      uint8_t *data, const String &message,uint16_t *detail=nullptr,const String &detailPath="") {
+  NetworkEvent event{type, generation, playing, latency, data, {0},detail,{0}};
+  strlcpy(event.detailPath,detailPath.c_str(),sizeof(event.detailPath));
   strlcpy(event.message, message.c_str(), sizeof(event.message));
   if (xQueueSend(networkEvents, &event, pdMS_TO_TICKS(50)) != pdTRUE) {
     if(detail)free(detail);
@@ -1043,6 +1082,28 @@ void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, 
     else if (type == NetworkEventType::Pack) delete reinterpret_cast<PackInstallInfo *>(data);
     else free(data);
   }
+}
+
+static uint16_t *fetchArtworkDetail(const String &path) {
+  constexpr size_t size=FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2;
+  HTTPClient http;WiFiClient plain;WiFiClientSecure secure;
+  if(!beginHttp(http,plain,secure,serviceOrigin+path))return nullptr;
+  const char *headers[]={"x-detail-sha256"};http.collectHeaders(headers,1);
+  http.setTimeout(5000);http.setConnectTimeout(3000);
+  int code=http.GET();String hash=http.header("x-detail-sha256");
+  if(code!=200||http.getSize()!=(int)size||hash.length()!=64){http.end();return nullptr;}
+  uint8_t *data=(uint8_t *)heap_caps_malloc(size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!data){http.end();return nullptr;}
+  auto stream=http.getStreamPtr();size_t n=0;uint32_t start=millis();
+  while(n<size&&millis()-start<8000){
+    int available=stream->available();
+    if(available>0){int got=stream->read(data+n,min((size_t)available,size-n));if(got>0)n+=got;}
+    else if(!http.connected())break;
+    else vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  http.end();
+  if(n!=size||sha256Hex(data,size)!=hash){free(data);return nullptr;}
+  return reinterpret_cast<uint16_t *>(data);
 }
 
 void legacyNetworkTask(void *) {
@@ -1150,16 +1211,23 @@ void networkTask(void *) {
   String shownKey, radioHash, knownPack = localPack.version;
   RemoteSnapshot pack;
   bool active = false, wasRadio = false;
+  uint32_t pollDelay=STATE_POLL_INTERVAL_MS;
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   for (;;) {
     NetworkCommand command;
     bool forced = xQueueReceive(networkCommands, &command, pdMS_TO_TICKS(50)) == pdTRUE;
     if (WiFi.status() != WL_CONNECTED) continue;
     uint32_t now = millis();
-    if (!forced && now - lastPoll < STATE_POLL_INTERVAL_MS) continue;
+    DetailJob detailJob;
+    if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE){
+      uint16_t *detail=fetchArtworkDetail(detailJob.path);
+      pushNetworkEvent(NetworkEventType::Detail,detailJob.id,false,0,nullptr,detail?"Artwork detail ready":"Artwork detail unavailable",detail);
+    }
+    if (!forced && now - lastPoll < pollDelay) continue;
     lastPoll = now;
     networkBusy = true;
     WiimPlayback current = pollWiim();
+    pollDelay=current.kind==WiimKind::Unknown?min(15000UL,pollDelay*2UL):STATE_POLL_INTERVAL_MS;
     bool recognized = current.kind == WiimKind::Music || current.kind == WiimKind::Radio;
     if (recognized) { active = true; idleSince = 0; }
     else if (current.kind == WiimKind::Idle) {
@@ -1176,7 +1244,7 @@ void networkTask(void *) {
                      reinterpret_cast<uint8_t *>(snapshot), "WiiM state");
     if (current.kind == WiimKind::Music && current.key != shownKey) {
       uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
-      uint16_t *detail=(uint16_t *)heap_caps_malloc(FACE_SOURCE_SIZE*FACE_SOURCE_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+      uint16_t *detail=(uint16_t *)heap_caps_malloc(FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
       if (bytes && wiimArtwork(reinterpret_cast<uint16_t *>(bytes),detail)) {
         // Reject an image fetched while the user was skipping tracks.
         WiimPlayback confirm = pollWiim();
@@ -1199,7 +1267,7 @@ void networkTask(void *) {
             if (pollWiim().kind == WiimKind::Radio) {
               radioHash = hash; shownKey = "kan88";
               latestRequestedGeneration = ++generation;
-              pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "KAN 88 artwork");
+              pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "KAN 88 artwork",nullptr,"/v1/detail/radio/"+hash+".rgb565");
             } else free(bytes);
           } else if (bytes) free(bytes);
         }
@@ -1334,7 +1402,7 @@ bool beginNextFallback(bool manual) {
   prefs.putUShort("packcursor", localPack.cursor);
   prefs.putUShort("packlast", localPack.lastIndex);
   lastFallbackAt = millis();
-  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging));
+  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging),nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(index)+".rgb565");
   startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
   lastResult = "local fallback ready";
   return true;
@@ -1363,12 +1431,23 @@ void processNetworkEvents() {
         lastRemoteGeneration = event.generation;
         lastFrameAt = millis();
         lastByteCount = FRAME_BYTES;
-        setFaceArtwork(reinterpret_cast<const uint16_t *>(event.data),event.detail);
+        setFaceArtwork(reinterpret_cast<const uint16_t *>(event.data),event.detail,event.detailPath);
         event.detail=nullptr;
         startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration);
         lastResult = event.message;
       }
       if (event.data) free(event.data);
+      if(event.detail)free(event.detail);
+    } else if(event.type==NetworkEventType::Detail) {
+      if(event.generation==faceArtworkId) {
+        faceDetailWaiting=false;
+        if(event.detail){
+          if(faceSource)free(faceSource);
+          faceSource=event.detail;event.detail=nullptr;faceDetailed=true;faceWidth=FACE_DETAIL_SIZE;
+          faceCount=0;faceIndex=-1;facePending=false;
+        }
+        requestFaceDetection();
+      }
       if(event.detail)free(event.detail);
     } else if (event.type == NetworkEventType::Pack) {
       if (event.data) {
@@ -1447,6 +1526,8 @@ void handleStatus() {
   j += "\"face_count\":" + String(faceCount) + ",";
   j += "\"face_index\":" + String(faceIndex) + ",";
   j += "\"face_detailed\":" + String(faceDetailed?"true":"false") + ",";
+  j += "\"face_source_px\":" + String(faceWidth) + ",";
+  j += "\"face_recovery\":" + String(faceRecovery?"true":"false") + ",";
   j += "\"quadrant_enabled\":" + String(quadrantEnabled?"true":"false") + ",";
   j += "\"quadrant_index\":" + String(quadrantIndex) + ",";
   j += "\"zoom_animating\":" + String(zoomAnimating?"true":"false") + ",";
@@ -1502,7 +1583,7 @@ void handleFaceZoom() {
     bool enabled=server.arg("value").toInt()!=0;
     if(enabled!=faceEnabled) {
       faceEnabled=enabled;prefs.putBool("facezoom",faceEnabled);
-      if(enabled) { if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);else requestFaceDetection();faceChangedAt=millis(); }
+      if(enabled) {faceRecovery=false;if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);else {requestArtworkDetail();if(!faceDetailWaiting)requestFaceDetection();}faceChangedAt=millis();}
       else {
         if(faceIndex>=0&&faceBaseValid)returnFullCover();
       }
@@ -1510,6 +1591,7 @@ void handleFaceZoom() {
   }
   if(server.hasArg("quadrant")) {
     quadrantEnabled=server.arg("quadrant").toInt()!=0;prefs.putBool("quadzoom",quadrantEnabled);
+    if(quadrantEnabled)requestArtworkDetail();
     if(!quadrantEnabled&&quadrantIndex>=0)returnFullCover();
     faceChangedAt=millis();
   }
@@ -1757,6 +1839,12 @@ void setup() {
   Serial.println("\nAlbum Clock " FIRMWARE_VERSION);
 
   loadSettings();
+  Serial.printf("Reset reason: %d\n",(int)esp_reset_reason());
+  if(faceInferenceMarker==FACE_BUSY_MAGIC && esp_reset_reason()!=ESP_RST_POWERON) {
+    faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
+    Serial.println("Face detection disabled after interrupted inference");
+  }
+  faceInferenceMarker=0;
   serviceOrigin = originFromUrl(frameUrl);
   if (!serviceOrigin.length()) serviceOrigin = originFromUrl(DEFAULT_FRAME_URL);
   initGammaLUT();
@@ -1767,6 +1855,7 @@ void setup() {
   networkEvents = xQueueCreate(6, sizeof(NetworkEvent));
   faceJobs=xQueueCreate(1,sizeof(FaceJob));
   faceResults=xQueueCreate(1,sizeof(FaceResult));
+  detailJobs=xQueueCreate(1,sizeof(DetailJob));
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
   }
@@ -1809,6 +1898,7 @@ void setup() {
     return;
   }
   xTaskCreatePinnedToCore(networkTask, "album-network", 12288, nullptr, 1, &networkTaskHandle, 0);
+  faceReady=true;requestFaceDetection();
 }
 
 void loop() {
@@ -1821,6 +1911,7 @@ void loop() {
   }
 
   processNetworkEvents();
+  server.handleClient();
   serviceTransition();
   serviceFaces();
   if (cachePending && !transition.active) { cachePending = false; persistFrame(); }

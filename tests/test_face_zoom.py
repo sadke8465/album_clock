@@ -19,9 +19,13 @@ int main(){
     assert(c.x+c.side==256 && c.y+c.side==256);
     c=faceCrop({100,100,150,150});
     assert(c.x<100 && c.x+c.side>150 && c.y<100 && c.y+c.side>150);
+    c=faceCrop({20,10,230,235});
+    assert(c.side==224 && c.x+c.side<=256 && c.y+c.side<=256);
     uint16_t original[256*256], output[64*64];
     for(auto &v:original)v=0x07e0;
     faceResize(original,256,256,output,64,c);
+    for(auto v:output)assert(v==0x07e0);
+    faceResizeClean(original,256,output,64,{0,0,256});
     for(auto v:output)assert(v==0x07e0);
     const uint16_t tiny[4]={0,0xffff,0xffff,0};
     uint16_t middle=faceSample(tiny,2,2,.5f,.5f);

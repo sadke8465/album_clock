@@ -127,13 +127,21 @@ static WiimPlayback pollWiim() {
 
 struct WiimJpegTarget { uint16_t *frame, *detail; int side, left, top; };
 static WiimJpegTarget wiimJpegTarget;
+static int wiimSampleLowerBound(int source,int origin,int side,int size) {
+  int lo=0,hi=size;
+  while(lo<hi){int mid=(lo+hi)/2;int value=origin+((2*mid+1)*side)/(2*size);
+    if(value<source)lo=mid+1;else hi=mid;}
+  return lo;
+}
 static void drawWiimTarget(JPEGDRAW *draw,uint16_t *target,int size) {
   auto &t = wiimJpegTarget;
   if(!target)return;
-  for (int y = 0; y < size; ++y) {
+  int x0=wiimSampleLowerBound(draw->x,t.left,t.side,size),x1=wiimSampleLowerBound(draw->x+draw->iWidthUsed,t.left,t.side,size);
+  int y0=wiimSampleLowerBound(draw->y,t.top,t.side,size),y1=wiimSampleLowerBound(draw->y+draw->iHeight,t.top,t.side,size);
+  for (int y = y0; y < y1; ++y) {
     int sy = t.top + ((2*y+1)*t.side)/(2*size);
     if (sy < draw->y || sy >= draw->y + draw->iHeight) continue;
-    for (int x = 0; x < size; ++x) {
+    for (int x = x0; x < x1; ++x) {
       int sx = t.left + ((2*x+1)*t.side)/(2*size);
       if (sx >= draw->x && sx < draw->x + draw->iWidthUsed)
         target[y*size+x] = draw->pPixels[(sy-draw->y)*draw->iWidth + sx-draw->x];
@@ -142,7 +150,7 @@ static void drawWiimTarget(JPEGDRAW *draw,uint16_t *target,int size) {
 }
 static int drawWiimJpeg(JPEGDRAW *draw) {
   drawWiimTarget(draw,wiimJpegTarget.frame,64);
-  drawWiimTarget(draw,wiimJpegTarget.detail,256);
+  drawWiimTarget(draw,wiimJpegTarget.detail,FACE_DETAIL_SIZE);
   return 1;
 }
 static bool wiimArtwork(uint16_t *frame,uint16_t *detail=nullptr) {
@@ -154,11 +162,13 @@ static bool wiimArtwork(uint16_t *frame,uint16_t *detail=nullptr) {
   JPEGDEC *jpeg = new JPEGDEC;
   if (ok && jpeg->openRAM(bytes, n, drawWiimJpeg)) {
     int w = jpeg->getWidth(), h = jpeg->getHeight(), side = min(w,h);
+    Serial.printf("WiiM artwork source: %dx%d\n",w,h);
     wiimJpegTarget = {frame,detail,side,(w-side)/2,(h-side)/2};
     memset(frame, 0, 8192);
-    if(detail)memset(detail,0,256*256*2);
+    if(detail)memset(detail,0,FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2);
     jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
     ok = side > 0 && side <= 4096 && jpeg->decode(0,0,0);
+    if(ok&&detail)faceResizeClean(detail,FACE_DETAIL_SIZE,frame,64,{0,0,FACE_SOURCE_SIZE});
     jpeg->close();
   } else ok = false;
   delete jpeg;

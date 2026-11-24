@@ -86,7 +86,7 @@ small{color:#888}
 <h3>Status</h3>
 <pre id="st">loading&hellip;</pre>
 <script>
-var $=function(i){return document.getElementById(i)},lastGeneration=-1,statusTimer=0,submitting=false;
+var $=function(i){return document.getElementById(i)},lastGeneration=-1,statusTimer=0,submitting=false,statusBusy=false,previewBusy=false;
 var imageFields=[
  ['contrast','Contrast',0,200,100],['saturation','Saturation',0,200,100],
  ['exposure','Exposure',-100,100,0],['warmth','Warmth',-100,100,0],
@@ -118,22 +118,22 @@ function setQuadrantZoom(){var data=new URLSearchParams();data.set('quadrant',$(
 function setZoomDuration(){var data=new URLSearchParams();data.set('duration',$('zoomdur').value);sendFace(data);}
 function sendFace(data){timedFetch('/facezoom',{method:'POST',body:data},3000).then(function(r){return r.text().then(function(t){if(!r.ok)throw Error(t);return t})}).then(function(t){$('st').textContent=t;loadStatus();}).catch(function(e){$('faceStatus').textContent=e.message;});}
 $('c').onclick=function(){if(!$('nextFace').disabled)faceAction('next');else if(!$('nextQuad').disabled)faceAction('nextquad');};
-function timedFetch(url,options,timeout){var c=new AbortController(),t=setTimeout(function(){c.abort()},timeout||2500);options=options||{};options.signal=c.signal;return fetch(url,options).finally(function(){clearTimeout(t)});}
-function drawFrame(){timedFetch('/frame.bin?t='+Date.now(),{},2500).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
+function timedFetch(url,options,timeout){var c=new AbortController();setTimeout(function(){c.abort()},Math.max(timeout||2500,5000));options=options||{};options.signal=c.signal;return fetch(url,options);}
+function drawFrame(){if(previewBusy||document.hidden)return;previewBusy=true;timedFetch('/frame.bin?t='+Date.now(),{},5000).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
  var d=new DataView(b),ctx=$('c').getContext('2d'),img=ctx.createImageData(64,64),i,v,r,g,bl;
  for(i=0;i<4096;i++){v=d.getUint16(i*2,true);
   r=(v>>11&31)*255/31|0;g=(v>>5&63)*255/63|0;bl=(v&31)*255/31|0;
   img.data[i*4]=r;img.data[i*4+1]=g;img.data[i*4+2]=bl;img.data[i*4+3]=255;}
- ctx.putImageData(img,0,0);}).catch(function(){});}
+ ctx.putImageData(img,0,0);}).catch(function(){}).finally(function(){previewBusy=false;});}
 function esc(v){return String(v==null?'':v).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]})}
-function loadStatus(){clearTimeout(statusTimer);timedFetch('/status',{},2200).then(function(r){if(!r.ok)throw Error('status '+r.status);return r.json()}).then(function(s){
+function loadStatus(){clearTimeout(statusTimer);if(document.hidden||statusBusy){statusTimer=setTimeout(loadStatus,5000);return;}statusBusy=true;timedFetch('/status',{},5000).then(function(r){if(!r.ok)throw Error('status '+r.status);return r.json()}).then(function(s){
  $('st').textContent=JSON.stringify(s,null,2);
  var busy=!!(s.network_busy||s.transition_active||s.next_queued||s.zoom_animating),playing=s.playback==='playing';
  $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_count||s.transition_active;
  $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
  $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&!s.zoom_animating;
  if(document.activeElement.id!=='zoomdur'&&s.zoom_duration!=null){$('zoomdur').value=s.zoom_duration;$('zoomdurv').textContent=s.zoom_duration;}
- $('faceStatus').textContent=!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+(s.face_detailed?' — high resolution':' — 64×64 source');
+ $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled?'Off':s.face_pending?'Detecting faces…':(s.face_enabled?(s.face_count||0)+' face(s) detected':'Quadrant mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
  $('summary').innerHTML='<div class="card">Playback<b>'+esc(s.playback||'unknown')+'</b></div><div class="card">Service<b>'+esc(s.service_status||'unknown')+'</b></div><div class="card">Fallback pack<b>'+esc(s.pack_count||0)+' covers</b></div><div class="card">Network<b>'+esc(s.last_network_latency_ms||0)+' ms</b></div>';
  $('nextBtn').disabled=playing||submitting||!s.pack_count;$('nextBtn').title=playing?'Next is available while playback is idle':(!s.pack_count?'Fallback pack is still syncing':'');
  $('refreshBtn').disabled=submitting;
@@ -156,8 +156,8 @@ function loadStatus(){clearTimeout(statusTimer);timedFetch('/status',{},2200).th
  function sr(id,lbl,val){if(af!==id&&val!=null){$(id).value=val;if(lbl)$(lbl).textContent=val;}}
  sr('fdur','fdurl',s.fade_ms);sr('fhold','fholdl',s.fade_hold_ms);sr('bal','balv',s.balance);
  sr('spr','sprv',s.spread);sr('sft','sftv',s.soft);sr('jit','jitv',s.jitter);sr('des','desv',s.desat);
- statusTimer=setTimeout(loadStatus,busy?500:5000);
-}).catch(function(e){$('st').textContent='Status unavailable: '+e.message;statusTimer=setTimeout(loadStatus,2000);});}
+ statusTimer=setTimeout(loadStatus,busy?2000:5000);
+}).catch(function(e){$('st').textContent='Status unavailable: '+e.message;statusTimer=setTimeout(loadStatus,5000);}).finally(function(){statusBusy=false;});}
 function setOrder(){var f=new URLSearchParams();f.set('value',$('order').value);fetch('/colororder',{method:'POST',body:f}).then(function(r){return r.text()}).then(function(t){$('st').textContent=t;setTimeout(drawFrame,600);});}
 function setMode(){var f=new URLSearchParams();f.set('value',$('mode').value);fetch('/mode',{method:'POST',body:f}).then(function(r){return r.text()}).then(function(t){$('st').textContent=t;});}
 function setFade(){var f=new URLSearchParams();
@@ -172,5 +172,6 @@ $('bright').onchange=function(){var f=new URLSearchParams();f.set('value',$('bri
 function save(){var f=new URLSearchParams();f.set('ssid',$('ssid').value);f.set('pass',$('pass').value);f.set('url',$('url').value);f.set('brightness',$('bright').value);
  timedFetch('/save',{method:'POST',body:f},3000).then(function(r){return r.text()}).then(function(t){$('st').textContent=t;loadStatus();});}
 function act(p,button){if(submitting)return;submitting=true;if(button)button.disabled=true;timedFetch(p,{method:'POST'},1500).then(function(r){return r.text().then(function(t){if(!r.ok)throw Error(t);return t})}).then(function(t){$('st').textContent=t;}).catch(function(e){$('st').textContent='Action failed: '+e.message;}).finally(function(){submitting=false;loadStatus();});}
+document.addEventListener('visibilitychange',function(){if(!document.hidden){loadStatus();drawFrame();}});
 loadStatus();drawFrame();
 </script></body></html>)HTML";

@@ -4,6 +4,7 @@ import albumsCsv from "../../data/albums.csv";
 import {
   FRAME_BYTES,
   albumsFromCsv,
+  parseCsv,
   generatedFallbackFrame,
   pickLastfmImage,
   rgbaToRgb565,
@@ -12,6 +13,7 @@ import {
 import {
   fallbackIndex,
   parseByteRange,
+  parsePackHeader,
   readCurrentManifest,
   readFallbackFrame,
 } from "./pack";
@@ -38,6 +40,9 @@ const RESOLVER_TIMEOUT_MS = 1_500;
 const IMAGE_TIMEOUT_MS = 2_500;
 const PREPARE_DEADLINE_MS = 6_000;
 const ALBUMS = albumsFromCsv(albumsCsv);
+const DETAIL_SIZE = 512;
+const DETAIL_BYTES = DETAIL_SIZE * DETAIL_SIZE * 2;
+const DETAIL_CATALOG = new Map(parseCsv(albumsCsv).map(row => [row.id, row]));
 
 type JsonRecord = Record<string, unknown>;
 
@@ -341,7 +346,7 @@ async function fetchImage(
   return response.arrayBuffer();
 }
 
-function processToRgb565(bytes: ArrayBuffer): Uint8Array {
+function processToRgb565(bytes: ArrayBuffer, size = 64): Uint8Array {
   const source = PhotonImage.new_from_byteslice(new Uint8Array(bytes));
   let square: PhotonImage | null = null;
   let resized: PhotonImage | null = null;
@@ -356,12 +361,12 @@ function processToRgb565(bytes: ArrayBuffer): Uint8Array {
     }
     resized = resize(
       square ?? source,
-      64,
-      64,
+      size,
+      size,
       SamplingFilter.Lanczos3
     );
     const frame = rgbaToRgb565(resized.get_raw_pixels());
-    if (frame.byteLength !== FRAME_BYTES) {
+    if (frame.byteLength !== size * size * 2) {
       throw new Error(`Bad processed frame length ${frame.byteLength}`);
     }
     return frame;
@@ -370,6 +375,62 @@ function processToRgb565(bytes: ArrayBuffer): Uint8Array {
     square?.free();
     source.free();
   }
+}
+
+function similarCover(a: Uint8Array,b: Uint8Array): boolean {
+  if(a.length!==FRAME_BYTES||b.length!==FRAME_BYTES)return false;
+  let sum=0;
+  for(let i=0;i<a.length;i+=2) {
+    const x=a[i]|a[i+1]<<8,y=b[i]|b[i+1]<<8;
+    sum+=Math.abs((x>>11)-(y>>11))*8+Math.abs(((x>>5)&63)-((y>>5)&63))*4+Math.abs((x&31)-(y&31))*8;
+  }
+  return sum/(64*64*3)<25;
+}
+
+async function storeDetail(env: Env,key:string,detail:Uint8Array):Promise<void>{
+  await env.FRAMES.put(key,detail,{httpMetadata:{contentType:"application/octet-stream"},
+    customMetadata:{sha256:await hashBytes(detail)}});
+}
+async function serveDetail(env:Env,key:string):Promise<Response>{
+  const object=await env.FRAMES.get(key);
+  if(!object||object.size!==DETAIL_BYTES||!object.customMetadata?.sha256)
+    return jsonResponse({error:"detail_unavailable"},{status:404});
+  return new Response(object.body,{headers:{"content-type":"application/octet-stream",
+    "content-length":String(DETAIL_BYTES),"x-detail-sha256":object.customMetadata.sha256,
+    "cache-control":"public,max-age=31536000,immutable",...corsHeaders()}});
+}
+async function fallbackDetail(env:Env,version:string,index:number):Promise<Response>{
+  const key=`detail/fallback/${version}/${index}.rgb565`;
+  if(await env.FRAMES.head(key))return serveDetail(env,key);
+  const packKey=`fallback/packs/${version}.acpk`;
+  const h=await env.FRAMES.get(packKey,{range:{offset:0,length:16}});
+  const header=h&&parsePackHeader(await h.bytes());
+  if(!header||index>=header.count||header.metadataLength>500000)return jsonResponse({error:"invalid_pack"},{status:404});
+  const meta=await env.FRAMES.get(packKey,{range:{offset:16,length:header.metadataLength}});
+  const entries=meta&&asRecord(await meta.json())?.entries;
+  const entry=Array.isArray(entries)?asRecord(entries[index]):null;
+  const id=stringValue(entry?.id).replace(/^apple:/,"");
+  const row=DETAIL_CATALOG.get(id);
+  if(!row||!/^\d+$/.test(id))return jsonResponse({error:"detail_unavailable"},{status:404});
+  const base=await env.FRAMES.get(packKey,{range:{offset:16+header.metadataLength+index*FRAME_BYTES,length:FRAME_BYTES}});
+  if(!base)return jsonResponse({error:"detail_unavailable"},{status:404});
+  const original=await base.bytes();
+  let url=row.image_url;
+  if(!url){
+    try{
+      const result=asRecord(await fetchJson("https://itunes.apple.com/lookup?id="+id+"&country=il",env,2500));
+      const items=Array.isArray(result?.results)?result.results:[];
+      const match=items.map(asRecord).find(value=>String(value?.trackId)===id);
+      url=stringValue(match?.artworkUrl100).replace("100x100bb","600x600bb");
+    }catch{}
+  }
+  if(!url)return jsonResponse({error:"detail_unavailable"},{status:404});
+  try{
+    const image=await fetchImage(url,env,Date.now()+3000);
+    if(!similarCover(original,processToRgb565(image)))return jsonResponse({error:"cover_mismatch"},{status:404});
+    await storeDetail(env,key,processToRgb565(image,DETAIL_SIZE));
+    return serveDetail(env,key);
+  }catch{return jsonResponse({error:"detail_unavailable"},{status:404});}
 }
 
 async function prepareTrackFrame(
@@ -751,7 +812,7 @@ async function kan88State(env: Env): Promise<Response> {
     const now = Date.now();
     if (!title || !artists.length || !Number.isFinite(start) || !Number.isFinite(end) ||
         now > end + 15000 || now < start - 60000) return result(last);
-    const key = "kan88:track:v1:" + await hashBytes(new TextEncoder().encode(
+    const key = "kan88:track:v2:" + await hashBytes(new TextEncoder().encode(
       [radioNormalize(title), ...artists.map(radioNormalize)].join("|")));
     const cached = await env.KV.get(key, "json") as JsonRecord | null;
     if (cached) {
@@ -778,7 +839,7 @@ async function kan88State(env: Env): Promise<Response> {
         for (const item of Array.isArray(data?.results) ? data.results : []) {
           const row = asRecord(item);
           if (row && matches(row.trackName, row.artistName) && stringValue(row.artworkUrl100))
-            candidates.push({ image: stringValue(row.artworkUrl100).replace("100x100bb", "300x300bb"),
+            candidates.push({ image: stringValue(row.artworkUrl100).replace("100x100bb", "600x600bb"),
               album: stringValue(row.collectionName) });
         }
         if (candidates.length) break;
@@ -791,7 +852,7 @@ async function kan88State(env: Env): Promise<Response> {
         for (const item of Array.isArray(data?.data) ? data.data : []) {
           const row = asRecord(item), artist = asRecord(row?.artist), album = asRecord(row?.album);
           if (row && matches(row.title, artist?.name) && stringValue(album?.cover_medium))
-            candidates.push({ image: stringValue(album?.cover_medium), album: stringValue(album?.title) });
+            candidates.push({ image: stringValue(album?.cover_big)||stringValue(album?.cover_medium), album: stringValue(album?.title) });
         }
       } catch { /* Retain last verified cover. */ }
     }
@@ -812,7 +873,7 @@ async function kan88State(env: Env): Promise<Response> {
           for (const item of (Array.isArray(rec?.releases) ? rec.releases : []).slice(0, 4)) {
             const release = asRecord(item), id = stringValue(release?.id);
             if (/^[0-9a-f-]{36}$/.test(id)) candidates.push({
-              image: "https://coverartarchive.org/release/" + id + "/front-250",
+              image: "https://coverartarchive.org/release/" + id + "/front-500",
               album: stringValue(release?.title),
             });
           }
@@ -823,11 +884,14 @@ async function kan88State(env: Env): Promise<Response> {
     candidates.sort((a,b) => Number(compilation(a.album)) - Number(compilation(b.album)));
     for (const candidate of candidates.slice(0,3)) {
       try {
-        const frame = processToRgb565(await fetchImage(candidate.image, env, Date.now() + 2500));
+        const image = await fetchImage(candidate.image, env, Date.now() + 2500);
+        const frame = processToRgb565(image);
         const sha256 = await hashBytes(frame);
         await env.FRAMES.put(`frames/${sha256}.rgb565`, frame, {
           httpMetadata: { contentType: "application/octet-stream" },
         });
+        // Keep a separate 512px crop source; the existing 64px API stays intact.
+        try{await storeDetail(env,`detail/radio/${sha256}.rgb565`,processToRgb565(image,DETAIL_SIZE));}catch{}
         const value = { status: "ready", title, artists, sha256, album: candidate.album };
         await env.KV.put(key, JSON.stringify(value), { expirationTtl: 2592000 });
         await env.KV.put(lastKey, JSON.stringify(value));
@@ -904,6 +968,10 @@ export default {
         return serveCurrentManifest(env);
       }
       if (url.pathname === "/v1/radio/kan88/state") return kan88State(env);
+      const radioDetail=url.pathname.match(/^\/v1\/detail\/radio\/([a-f0-9]{64})\.rgb565$/);
+      if(radioDetail)return serveDetail(env,`detail/radio/${radioDetail[1]}.rgb565`);
+      const randomDetail=url.pathname.match(/^\/v1\/detail\/fallback\/([a-f0-9]{64})\/(\d{1,4})\.rgb565$/);
+      if(randomDetail)return fallbackDetail(env,randomDetail[1],Number(randomDetail[2]));
       const frameMatch = url.pathname.match(
         /^\/v1\/frames\/([a-f0-9]{64})\.rgb565$/
       );
