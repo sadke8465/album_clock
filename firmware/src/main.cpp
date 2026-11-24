@@ -16,6 +16,7 @@
 #include "AlbumClockConfig.h"
 #include "AudioReactive.h"
 #include "PortalPage.h"
+#include "ImageAdjustments.h"
 #include "WiimSource.h"
 
 #if __has_include("LocalSecrets.h")
@@ -35,6 +36,9 @@ static uint8_t staging[FRAME_BYTES];                // atomic download buffer
 static uint16_t transitionFrom[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
+static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
+static ImageAdjustments imageSettings;
+#define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150)
 
 static String wifiSsid;
 static String wifiPass;
@@ -180,15 +184,30 @@ void drawTestCard() {
   }
 }
 
+static bool imageNeutral() {
+  const ImageAdjustments defaults;
+  bool neutral = true;
+#define CHECK_IMAGE(name,lo,hi) neutral = neutral && imageSettings.name == defaults.name;
+  IMAGE_FIELDS(CHECK_IMAGE)
+#undef CHECK_IMAGE
+  return neutral;
+}
+static const uint16_t *adjustedArtwork(const uint16_t *source) {
+  if (imageNeutral()) return source;
+  imageRender(source,adjustedFrame,adjustmentScratch,imageSettings);
+  return adjustedFrame;
+}
+
 void drawFrame() {
   if (!display) return;
   if (testCard) {
     drawTestCard();
     return;
   }
+  const uint16_t *art = adjustedArtwork(frame);
   for (int y = 0; y < FRAME_HEIGHT; y++) {
     for (int x = 0; x < FRAME_WIDTH; x++) {
-      uint16_t v = frame[y * FRAME_WIDTH + x];
+      uint16_t v = art[y * FRAME_WIDTH + x];
       uint8_t r5 = (v >> 11) & 0x1F, g6 = (v >> 5) & 0x3F, b5 = v & 0x1F;
       // Expand to 8-bit per channel.
       uint8_t r = (r5 << 3) | (r5 >> 2);
@@ -321,6 +340,7 @@ void drawBlend(int x, int y, uint16_t vo, uint16_t vn, float ow, float nw) {
 }
 
 void drawFinal(const uint16_t *buf) {
+  buf = adjustedArtwork(buf);
   for (int y = 0; y < FRAME_HEIGHT; y++)
     for (int x = 0; x < FRAME_WIDTH; x++)
       drawScaled(x, y, buf[y * FRAME_WIDTH + x], 1.0f);
@@ -421,10 +441,14 @@ void serviceTransition() {
         else value = scaled565(transitionTo[i], easef(easeIn, framp((elapsed - inStart) / inDuration, fieldNew[i] / 255.0f, spread, soft)));
       }
       compositeFrame[i] = value;
-      if (!testCard) draw565(x, y, value);
     }
   }
 
+  if (!testCard) {
+    const uint16_t *art = adjustedArtwork(compositeFrame);
+    for (int y=0;y<FRAME_HEIGHT;y++) for (int x=0;x<FRAME_WIDTH;x++)
+      draw565(x,y,art[y*FRAME_WIDTH+x]);
+  }
   if (progress >= 1.0f) {
     memcpy(frame, transitionTo, FRAME_BYTES);
     memcpy(compositeFrame, frame, FRAME_BYTES);
@@ -537,6 +561,9 @@ void loadSettings() {
   prefs.begin("album-clock", false);
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
+#define LOAD_IMAGE(name,lo,hi) imageSettings.name = constrain(prefs.getShort("im_" #name, imageSettings.name), lo, hi);
+  IMAGE_FIELDS(LOAD_IMAGE)
+#undef LOAD_IMAGE
   frameUrl = prefs.getString("url", DEFAULT_FRAME_URL);
   brightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
   if (brightness < 1) brightness = DEFAULT_BRIGHTNESS;
@@ -1249,6 +1276,9 @@ void handleStatus() {
   j += "\"frame_url\":\"" + jsonEscape(frameUrl) + "\",";
   j += "\"brightness\":" + String(brightness) + ",";
   j += "\"color_order\":" + String(colorOrder) + ",";
+#define STATUS_IMAGE(name,lo,hi) j += "\"im_" #name "\":" + String(imageSettings.name) + ",";
+  IMAGE_FIELDS(STATUS_IMAGE)
+#undef STATUS_IMAGE
   j += "\"test_card\":" + String(testCard ? "true" : "false") + ",";
   j += "\"fade_enabled\":" + String(fadeEnabled ? "true" : "false") + ",";
   j += "\"fade_ms\":" + String(transitionMs) + ",";
@@ -1294,9 +1324,21 @@ void handleStatus() {
 }
 
 void handleFrameBin() {
+  const uint16_t *art = adjustedArtwork(frame);
   server.setContentLength(FRAME_BYTES);
   server.send(200, "application/octet-stream", "");
-  server.client().write(reinterpret_cast<const uint8_t *>(frame), FRAME_BYTES);
+  server.client().write(reinterpret_cast<const uint8_t *>(art), FRAME_BYTES);
+}
+
+void handleImageAdjustments() {
+  if (server.hasArg("reset")) imageSettings = ImageAdjustments{};
+#define SET_IMAGE(name,lo,hi) \
+  if (server.hasArg(#name)) imageSettings.name = constrain(server.arg(#name).toInt(),lo,hi); \
+  if (server.hasArg(#name) || server.hasArg("reset")) prefs.putShort("im_" #name,imageSettings.name);
+  IMAGE_FIELDS(SET_IMAGE)
+#undef SET_IMAGE
+  if (displayMode == 0 && !transition.active) drawFrame();
+  server.send(200,"text/plain","Image adjustments saved");
 }
 
 void applyBrightness(uint8_t value) {
@@ -1468,6 +1510,7 @@ void setupRoutes() {
   server.on("/colororder", HTTP_POST, handleColorOrder);
   server.on("/testcard", HTTP_POST, handleTestCard);
   server.on("/fade", HTTP_POST, handleFade);
+  server.on("/image", HTTP_POST, handleImageAdjustments);
   server.on("/mode", HTTP_POST, handleMode);
   server.on("/refresh", HTTP_POST, handleRefresh);
   server.on("/next", HTTP_POST, handleNext);

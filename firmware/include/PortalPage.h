@@ -40,6 +40,10 @@ small{color:#888}
 <label>Frame URL</label><input id="url" autocomplete="off">
 <label>Brightness (1-255): <span id="bval"></span></label><input id="bright" type="range" min="1" max="255">
 <div class="row"><button class="primary" onclick="save()">Save &amp; apply</button></div>
+<h3>Artwork appearance</h3>
+<small>Applies to WiiM, Kan 88 and random artwork. Changes are saved automatically.</small>
+<div id="imageControls"></div>
+<button onclick="resetImage()">Reset image adjustments</button>
 <h3>Color calibration</h3>
 <label>Panel color order</label>
 <select id="order" onchange="setOrder()">
@@ -75,6 +79,27 @@ small{color:#888}
 <pre id="st">loading&hellip;</pre>
 <script>
 var $=function(i){return document.getElementById(i)},lastGeneration=-1,statusTimer=0,submitting=false;
+var imageFields=[
+ ['contrast','Contrast',0,200,100],['saturation','Saturation',0,200,100],
+ ['exposure','Exposure',-100,100,0],['warmth','Warmth',-100,100,0],
+ ['tint','Tint (green / magenta)',-100,100,0],['hue','Hue rotation',-180,180,0],
+ ['gamma','Midtone brightness (gamma)',50,200,100],['blur','Blur (pixels)',0,4,0],
+ ['red','Red gain',50,150,100],['green','Green gain',50,150,100],['blue','Blue gain',50,150,100]
+],imageBusy=false;
+imageFields.forEach(function(f){
+ var label=document.createElement('label'),v=document.createElement('span'),slider=document.createElement('input');
+ label.textContent=f[1]+': ';v.id='iv_'+f[0];v.textContent=f[4];label.appendChild(v);
+ slider.type='range';slider.id='im_'+f[0];slider.min=f[2];slider.max=f[3];slider.value=f[4];slider.step=1;
+ slider.oninput=function(){v.textContent=slider.value;};
+ slider.onchange=function(){var data=new URLSearchParams();data.set(f[0],slider.value);sendImage(data);};
+ $('imageControls').appendChild(label);$('imageControls').appendChild(slider);
+});
+function sendImage(data){imageBusy=true;timedFetch('/image',{method:'POST',body:data},3000)
+ .then(function(r){if(!r.ok)throw Error('Image adjustment '+r.status);return r.text();})
+ .then(function(t){$('st').textContent=t;drawFrame();})
+ .catch(function(e){$('st').textContent=e.message;})
+ .finally(function(){imageBusy=false;loadStatus();});}
+function resetImage(){var data=new URLSearchParams();data.set('reset','1');sendImage(data);}
 function timedFetch(url,options,timeout){var c=new AbortController(),t=setTimeout(function(){c.abort()},timeout||2500);options=options||{};options.signal=c.signal;return fetch(url,options).finally(function(){clearTimeout(t)});}
 function drawFrame(){timedFetch('/frame.bin?t='+Date.now(),{},2500).then(function(r){if(!r.ok)throw Error('preview '+r.status);return r.arrayBuffer()}).then(function(b){
  var d=new DataView(b),ctx=$('c').getContext('2d'),img=ctx.createImageData(64,64),i,v,r,g,bl;
@@ -95,6 +120,7 @@ function loadStatus(){clearTimeout(statusTimer);timedFetch('/status',{},2200).th
  if(document.activeElement.id!=='bright'){$('bright').value=s.brightness;$('bval').textContent=s.brightness;}
  if(document.activeElement.id!=='order'&&s.color_order!=null)$('order').value=s.color_order;
  var af=document.activeElement.id;
+ if(!imageBusy)imageFields.forEach(function(f){var id='im_'+f[0];if(af!==id&&s[id]!=null){$(id).value=s[id];$('iv_'+f[0]).textContent=s[id];}});
  if(af!=='mode'&&s.display_mode!=null)$('mode').value=s.display_mode;
  if(s.fade_enabled!=null)$('fade').checked=s.fade_enabled;
  if(af!=='method'&&s.fade_method!=null)$('method').value=s.fade_method;
