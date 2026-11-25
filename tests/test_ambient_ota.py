@@ -27,6 +27,24 @@ int main(){
         for(int i=0;i<4096;i++)if(i%64<16)assert(out[i]==0&&second[i]==0);
     }
     a.mode=1;a.intensity=0;ambientRender(base,out,a,1000);assert(!memcmp(base,out,sizeof(base)));
+    // Default sparkle must visibly change more than a handful of pixels,
+    // without lifting black areas.
+    a=AmbientSettings{};ambientRender(base,out,a,2100);
+    int changed=0,strong=0;
+    for(int i=0;i<4096;i++){
+        if(out[i]!=base[i])changed++;
+        if(imageR(out[i])-imageR(base[i])>=16)strong++;
+        if(i%64<16)assert(out[i]==0);
+    }
+    assert(changed>=20&&strong>=10);
+    // White has no headroom for additive highlights; Light & Shade must
+    // still produce visible movement on white artwork.
+    for(int i=0;i<4096;i++)base[i]=i%64<16?0:0xffff;
+    a.mode=3;a.blend=3;a.intensity=60;
+    ambientRender(base,out,a,0);ambientRender(base,second,a,4000);
+    assert(imageR(out[32])<230);
+    assert(memcmp(out,second,sizeof(out)));
+    for(int i=0;i<4096;i++)if(i%64<16)assert(out[i]==0&&second[i]==0);
     assert(otaNewer("3.8.1-wiim","3.8.0-wiim"));
     assert(otaNewer("3.10.0-wiim","3.9.9-wiim"));
     assert(!otaNewer("3.7.9-wiim","3.8.0-wiim"));

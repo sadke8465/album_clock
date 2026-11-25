@@ -49,7 +49,7 @@ static AmbientSettings ambientSettings;
 static uint16_t *ambientBase=nullptr,*ambientOutput=nullptr;
 static bool ambientRendered=false,ambientBaseValid=false;
 static uint32_t ambientLastDraw=0;
-#define AMBIENT_FIELDS(X) X(mode,0,5) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,2) X(fps,5,25)
+#define AMBIENT_FIELDS(X) X(mode,0,5) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25)
 static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
@@ -826,6 +826,16 @@ void loadSettings() {
 #define LOAD_AMBIENT(name,lo,hi) ambientSettings.name=constrain(prefs.isKey("am_" #name)?prefs.getShort("am_" #name,ambientSettings.name):ambientSettings.name,lo,hi);
   AMBIENT_FIELDS(LOAD_AMBIENT)
 #undef LOAD_AMBIENT
+  // Upgrade the original subtle preset, but respect customized effects or Off.
+  if(ambientSettings.mode==1&&ambientSettings.target==0&&ambientSettings.intensity==22&&
+     ambientSettings.density==18&&ambientSettings.speed==65&&ambientSettings.size==1&&
+     ambientSettings.threshold==88&&ambientSettings.softness==70&&ambientSettings.palette==0&&
+     ambientSettings.direction==0&&ambientSettings.blend==0&&ambientSettings.fps==15){
+    ambientSettings=AmbientSettings{};
+#define SAVE_AMBIENT(name,lo,hi) prefs.putShort("am_" #name,ambientSettings.name);
+    AMBIENT_FIELDS(SAVE_AMBIENT)
+#undef SAVE_AMBIENT
+  }
   if(prefs.isKey("facecache3")&&prefs.getBytesLength("facecache3")==sizeof(faceCache))prefs.getBytes("facecache3",faceCache,sizeof(faceCache));
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";

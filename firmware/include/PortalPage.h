@@ -61,8 +61,8 @@ pre{background:var(--sub);padding:12px;border-radius:9px;font-size:11px;overflow
 <button class="primary" onclick="openPanel('ambient')">Explore ambient effects</button>
 </section>
 <section class="panel" data-panel="ambient" hidden>
-<h3>Ambient effects</h3><p class="caption">Subtle, responsive light over the album artwork. Pure black remains dark in highlights mode. Effects pause during cover and zoom transitions.</p>
-<div class="presets"><button onclick="ambientPreset('sparkle')">✦ &nbsp; Subtle sparkle</button><button onclick="ambientPreset('shimmer')">≈ &nbsp; Silk shimmer</button><button onclick="ambientPreset('breathe')">○ &nbsp; Slow breathing</button><button onclick="ambientPreset('drift')">⋯ &nbsp; Drifting embers</button><button onclick="ambientPreset('ripple')">◎ &nbsp; Soft ripple</button><button onclick="ambientSetting('mode',0)">Off</button></div>
+<h3>Ambient effects</h3><p class="caption">Responsive light over the album artwork. Try Luminous sparkle or Light sweep for more visible movement. Pure black remains dark in highlights mode. Effects pause during cover and zoom transitions.</p>
+<div class="presets"><button onclick="ambientPreset('sparkle')">✦ &nbsp; Luminous sparkle</button><button onclick="ambientPreset('bold')">✧ &nbsp; Bold sparkle</button><button onclick="ambientPreset('shimmer')">≈ &nbsp; Light sweep</button><button onclick="ambientPreset('breathe')">○ &nbsp; Breathing light</button><button onclick="ambientPreset('drift')">⋯ &nbsp; Drifting embers</button><button onclick="ambientPreset('ripple')">◎ &nbsp; Luminous ripple</button><button onclick="ambientPreset('subtle')">· &nbsp; Subtle sparkle</button><button onclick="ambientSetting('mode',0)">Off</button></div>
 <div id="ambientControls"></div>
 <button onclick="ambientPreset('reset')">Restore recommended settings</button>
 </section>
@@ -142,11 +142,11 @@ function openPanel(id){
 var ambientFields=[
  ['mode','Effect',0,5,1,['Off','Sparkle','Silk shimmer','Breathing','Drifting embers','Soft ripple']],
  ['target','Light follows',0,4,0,['Luminance / highlights','Shadows','Edges / contrast','Entire image','Saturated colors']],
- ['intensity','Intensity',0,100,22],['density','Density / wave width',1,48,18],['speed','Speed',10,200,65],
- ['size','Particle size',1,3,1],['threshold','Target threshold',0,245,88],['softness','Softness',0,100,70],
- ['palette','Light color',0,4,0,['Artwork color','White','Warm amber','Cool blue','Multicolor']],
+ ['intensity','Intensity',0,100,68],['density','Density / wave width',1,48,34],['speed','Speed',10,200,80],
+ ['size','Particle size',1,3,2],['threshold','Target threshold',0,245,40],['softness','Softness',0,100,35],
+ ['palette','Light color',0,4,1,['Artwork color','White','Warm amber','Cool blue','Multicolor']],
  ['direction','Direction',0,3,0,['Right','Left','Down','Up']],
- ['blend','Blend',0,2,0,['Mix','Screen','Additive']],['fps','Animation frame rate',5,25,15]
+ ['blend','Blend',0,3,0,['Mix','Screen','Additive','Light & shade (waves)']],['fps','Animation frame rate',5,25,15]
 ],ambientBusy=false;
 ambientFields.forEach(function(f){
  var label=document.createElement('label'),v=document.createElement('span'),control=document.createElement(f[5]?'select':'input'),id='am_'+f[0];
@@ -165,11 +165,13 @@ function sendAmbient(data){ambientBusy=true;timedFetch('/ambient',{method:'POST'
 function ambientSetting(name,value){var data=new URLSearchParams();data.set(name,value);sendAmbient(data);}
 function ambientPreset(name){
  var presets={
- sparkle:{mode:1,target:0,intensity:22,density:18,speed:65,size:1,threshold:88,softness:70,palette:0,direction:0,blend:0,fps:15},
- shimmer:{mode:2,target:0,intensity:32,density:24,speed:45,size:1,threshold:55,softness:65,palette:1,direction:0,blend:1,fps:15},
- breathe:{mode:3,target:0,intensity:25,density:18,speed:25,size:1,threshold:35,softness:75,palette:0,direction:0,blend:1,fps:12},
- drift:{mode:4,target:0,intensity:38,density:16,speed:55,size:2,threshold:55,softness:70,palette:2,direction:3,blend:1,fps:15},
- ripple:{mode:5,target:0,intensity:26,density:18,speed:55,size:1,threshold:45,softness:70,palette:0,direction:0,blend:1,fps:15},
+ sparkle:{mode:1,target:0,intensity:68,density:34,speed:80,size:2,threshold:40,softness:35,palette:1,direction:0,blend:0,fps:15},
+ bold:{mode:1,target:0,intensity:95,density:48,speed:105,size:3,threshold:25,softness:30,palette:1,direction:0,blend:2,fps:15},
+ subtle:{mode:1,target:0,intensity:25,density:18,speed:65,size:1,threshold:88,softness:70,palette:0,direction:0,blend:0,fps:15},
+ shimmer:{mode:2,target:0,intensity:55,density:24,speed:55,size:1,threshold:40,softness:40,palette:1,direction:0,blend:3,fps:15},
+ breathe:{mode:3,target:0,intensity:50,density:18,speed:40,size:1,threshold:30,softness:45,palette:0,direction:0,blend:3,fps:12},
+ drift:{mode:4,target:0,intensity:75,density:30,speed:85,size:2,threshold:38,softness:40,palette:2,direction:3,blend:2,fps:15},
+ ripple:{mode:5,target:0,intensity:55,density:18,speed:65,size:1,threshold:35,softness:40,palette:0,direction:0,blend:3,fps:15},
  reset:{reset:1}
  };
  var data=new URLSearchParams();Object.keys(presets[name]).forEach(function(k){data.set(k,presets[name][k]);});sendAmbient(data);
