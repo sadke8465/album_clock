@@ -1,4 +1,5 @@
 #pragma once
+#include "WiimMetadata.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <JPEGDEC.h>
@@ -119,7 +120,8 @@ static WiimPlayback pollWiim() {
   if (wiimRadioTitle(title) && !meaningful(statusTitle))
     return {WiimKind::Idle, "", ""};
   String mode = status["mode"] | "";
-  if (mode == "1" && title == statusTitle && artist == statusArtist && album == statusAlbum &&
+  if (mode == "1" && wiimFieldMatches(title.c_str(),statusTitle.c_str()) &&
+      wiimFieldMatches(artist.c_str(),statusArtist.c_str()) && wiimFieldMatches(album.c_str(),statusAlbum.c_str()) &&
       meaningful(title) && meaningful(artist) && meaningful(album))
     return {WiimKind::Music, title + "\n" + artist + "\n" + album, title};
   return {WiimKind::Idle, "", ""};
