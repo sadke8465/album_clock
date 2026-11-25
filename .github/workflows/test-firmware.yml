@@ -38,3 +38,37 @@ jobs:
             firmware/.pio/build/waveshare-album-clock/firmware.bin
             firmware/.pio/build/waveshare-album-clock/bootloader.bin
             firmware/.pio/build/waveshare-album-clock/partitions.bin
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wiim-matrix'
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wiim-matrix'
+        working-directory: worker
+      - name: Publish verified OTA firmware
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/wiim-matrix'
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          BIN=../firmware/.pio/build/waveshare-album-clock/firmware.bin
+          export OTA_SHA=$(sha256sum "$BIN" | cut -d' ' -f1)
+          export OTA_SIZE=$(wc -c < "$BIN")
+          export OTA_VERSION=$(sed -n 's/^#define FIRMWARE_VERSION "\(.*\)"/\1/p' ../firmware/include/AlbumClockConfig.h)
+          export OTA_NOTES=$(git log -1 --format=%s)
+          python - <<'PY'
+          import json, os, re
+          version = os.environ["OTA_VERSION"]
+          assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-wiim", version)
+          size = int(os.environ["OTA_SIZE"])
+          assert 100000 < size <= 0x640000
+          with open("/tmp/ota-manifest.json", "w") as f:
+              json.dump({"board":"waveshare-s3-n32r16","version":version,"size":size,"sha256":os.environ["OTA_SHA"],"notes":os.environ["OTA_NOTES"]},f)
+          PY
+          npx wrangler r2 object put "albumclock-frames/firmware/releases/$OTA_SHA.bin" --remote --file "$BIN" --content-type application/octet-stream
+          npx wrangler r2 object get "albumclock-frames/firmware/releases/$OTA_SHA.bin" --remote --file /tmp/ota-verified.bin
+          test "$(sha256sum /tmp/ota-verified.bin | cut -d' ' -f1)" = "$OTA_SHA"
+          npx wrangler r2 object put "albumclock-frames/firmware/latest.json" --remote --file /tmp/ota-manifest.json --content-type application/json --cache-control no-store

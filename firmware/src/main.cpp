@@ -19,6 +19,8 @@
 #include "AudioReactive.h"
 #include "PortalPage.h"
 #include "ImageAdjustments.h"
+#include "AmbientEffects.h"
+#include "OtaUpdate.h"
 #include "FaceZoom.h"
 #include "SmartRegions.h"
 #include "human_face_detect_msr01.hpp"
@@ -43,6 +45,11 @@ static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
 static ImageAdjustments imageSettings;
+static AmbientSettings ambientSettings;
+static uint16_t *ambientBase=nullptr,*ambientOutput=nullptr;
+static bool ambientRendered=false,ambientBaseValid=false;
+static uint32_t ambientLastDraw=0;
+#define AMBIENT_FIELDS(X) X(mode,0,5) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,2) X(fps,5,25)
 static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
@@ -235,6 +242,15 @@ static const uint16_t *adjustedArtwork(const uint16_t *source) {
   return adjustedFrame;
 }
 
+static void rememberAmbientBase(const uint16_t *art) {
+  ambientRendered=false;
+  if(!ambientSettings.mode){ambientBaseValid=false;return;}
+  if(!ambientBase)ambientBase=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!ambientOutput)ambientOutput=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  ambientBaseValid=ambientBase&&ambientOutput;
+  if(ambientBaseValid)memcpy(ambientBase,art,FRAME_BYTES);
+}
+
 void drawFrame() {
   if (!display) return;
   if (testCard) {
@@ -242,6 +258,7 @@ void drawFrame() {
     return;
   }
   const uint16_t *art = adjustedArtwork(frame);
+  rememberAmbientBase(art);
   for (int y = 0; y < FRAME_HEIGHT; y++) {
     for (int x = 0; x < FRAME_WIDTH; x++) {
       uint16_t v = art[y * FRAME_WIDTH + x];
@@ -378,6 +395,7 @@ void drawBlend(int x, int y, uint16_t vo, uint16_t vn, float ow, float nw) {
 
 void drawFinal(const uint16_t *buf) {
   buf = adjustedArtwork(buf);
+  rememberAmbientBase(buf);
   for (int y = 0; y < FRAME_HEIGHT; y++)
     for (int x = 0; x < FRAME_WIDTH; x++)
       drawScaled(x, y, buf[y * FRAME_WIDTH + x], 1.0f);
@@ -407,6 +425,18 @@ static uint16_t blended565(uint16_t oldValue, uint16_t newValue, float oldWeight
 static void draw565(int x, int y, uint16_t value) {
   uint8_t r5 = (value >> 11) & 31, g6 = (value >> 5) & 63, b5 = value & 31;
   drawTrue(x, y, (r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2));
+}
+
+static void serviceAmbient() {
+  // The artwork and zoom animations own the panel during transitions.
+  // Filtering is cached; the effect does not touch source images or flash.
+  if(!ambientSettings.mode||!ambientBaseValid||!hasFrame||!display||testCard||displayMode!=0||transition.active||zoomAnimating||otaInstalling())return;
+  uint32_t now=millis();
+  if(now-ambientLastDraw<(uint32_t)(1000/ambientSettings.fps))return;
+  ambientLastDraw=now;
+  ambientRender(ambientBase,ambientOutput,ambientSettings,now);
+  for(int y=0;y<64;y++)for(int x=0;x<64;x++)draw565(x,y,ambientOutput[y*64+x]);
+  ambientRendered=true;
 }
 
 bool beginNextFallback(bool manual);
@@ -793,6 +823,9 @@ void setupMatrix() {
 // ---------------------------------------------------------------------------
 void loadSettings() {
   prefs.begin("album-clock", false);
+#define LOAD_AMBIENT(name,lo,hi) ambientSettings.name=constrain(prefs.isKey("am_" #name)?prefs.getShort("am_" #name,ambientSettings.name):ambientSettings.name,lo,hi);
+  AMBIENT_FIELDS(LOAD_AMBIENT)
+#undef LOAD_AMBIENT
   if(prefs.isKey("facecache3")&&prefs.getBytesLength("facecache3")==sizeof(faceCache))prefs.getBytes("facecache3",faceCache,sizeof(faceCache));
   wifiSsid = prefs.getString("ssid", "");
   wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
@@ -1292,6 +1325,12 @@ void networkTask(void *) {
     NetworkCommand command;
     bool forced = xQueueReceive(networkCommands, &command, pdMS_TO_TICKS(50)) == pdTRUE;
     if (WiFi.status() != WL_CONNECTED) continue;
+    uint8_t otaCommand;
+    if(otaQueue&&xQueueReceive(otaQueue,&otaCommand,0)==pdTRUE){
+      if(otaCommand==1)otaCheck(rootca_crt_bundle_start);
+      else if(otaCommand==2)otaInstall(rootca_crt_bundle_start);
+      continue;
+    }
     uint32_t now = millis();
     DetailJob detailJob;
     if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE){
@@ -1575,6 +1614,10 @@ void handleStatus() {
 
   String j = "{";
   j += "\"fw\":\"" FIRMWARE_VERSION "\",";
+  OtaStatus ota=getOtaStatus();
+  j += "\"ota_state\":"+String(ota.state)+",\"ota_progress\":"+String(ota.progress)+",";
+  j += "\"ota_version\":\""+jsonEscape(ota.version)+"\",\"ota_notes\":\""+jsonEscape(ota.notes)+"\",";
+  j += "\"ota_message\":\""+jsonEscape(ota.message)+"\",\"ota_token\":\""+String(otaToken)+"\",";
   j += "\"ap_mode\":" + String(apMode ? "true" : "false") + ",";
   j += "\"wifi_connected\":" + String(connected ? "true" : "false") + ",";
   j += "\"ssid\":\"" + jsonEscape(wifiSsid) + "\",";
@@ -1603,6 +1646,10 @@ void handleStatus() {
   j += "\"desat\":" + String(desatPct) + ",";
   j += "\"gamma\":" + String(gammaOn ? "true" : "false") + ",";
   j += "\"display_mode\":" + String(displayMode) + ",";
+#define STATUS_AMBIENT(name,lo,hi) j += "\"am_" #name "\":" + String(ambientSettings.name) + ",";
+  AMBIENT_FIELDS(STATUS_AMBIENT)
+#undef STATUS_AMBIENT
+  j += "\"ambient_rendered\":" + String(ambientRendered&&!transition.active&&!zoomAnimating&&displayMode==0&&!testCard?"true":"false") + ",";
   j += "\"face_enabled\":" + String(faceEnabled?"true":"false") + ",";
   j += "\"face_apple_music\":" + String(faceAppleMusic?"true":"false") + ",";
   j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
@@ -1651,10 +1698,35 @@ void handleStatus() {
 }
 
 void handleFrameBin() {
-  const uint16_t *art = adjustedArtwork(frame);
+  const uint16_t *art = ambientRendered&&ambientOutput&&!transition.active&&!zoomAnimating&&displayMode==0&&!testCard
+    ? ambientOutput : adjustedArtwork(transition.active?compositeFrame:frame);
   server.setContentLength(FRAME_BYTES);
   server.send(200, "application/octet-stream", "");
   server.client().write(reinterpret_cast<const uint8_t *>(art), FRAME_BYTES);
+}
+
+void handleAmbient(){
+  if(server.hasArg("reset"))ambientSettings=AmbientSettings{};
+#define SET_AMBIENT(name,lo,hi) \
+  if(server.hasArg(#name))ambientSettings.name=constrain(server.arg(#name).toInt(),lo,hi); \
+  if(server.hasArg(#name)||server.hasArg("reset"))prefs.putShort("am_" #name,ambientSettings.name);
+  AMBIENT_FIELDS(SET_AMBIENT)
+#undef SET_AMBIENT
+  ambientRendered=false;
+  if(displayMode==0&&!transition.active)drawFrame();
+  server.send(200,"text/plain","Ambient settings saved");
+}
+
+void handleOta(){
+  if(apMode||WiFi.status()!=WL_CONNECTED||!otaQueue){server.send(503,"text/plain","Connect to home Wi-Fi first");return;}
+  if(server.header("X-OTA-Token")!=otaToken){server.send(403,"text/plain","Update confirmation token required");return;}
+  auto s=getOtaStatus();
+  if(s.state==1||s.state==4||s.state==6){server.send(409,"text/plain","Update already in progress");return;}
+  uint8_t command=server.arg("action")=="check"?1:server.arg("action")=="install"?2:0;
+  if(!command||(command==2&&s.state!=2)){server.send(400,"text/plain","Check for an available update first");return;}
+  otaMessage(command==1?1:4,command==1?"Checking for updates":"Preparing update");
+  if(xQueueSend(otaQueue,&command,0)!=pdTRUE){otaMessage(5,"Update queue is busy");server.send(503,"text/plain","Try again");return;}
+  server.send(202,"text/plain","Update request accepted");
 }
 
 void handleImageAdjustments() {
@@ -1876,6 +1948,7 @@ void handleNotFound() {
 }
 
 void setupRoutes() {
+  const char *otaHeaders[]={"X-OTA-Token"};server.collectHeaders(otaHeaders,1);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/frame.bin", HTTP_GET, handleFrameBin);
@@ -1885,6 +1958,8 @@ void setupRoutes() {
   server.on("/testcard", HTTP_POST, handleTestCard);
   server.on("/fade", HTTP_POST, handleFade);
   server.on("/image", HTTP_POST, handleImageAdjustments);
+  server.on("/ambient", HTTP_POST, handleAmbient);
+  server.on("/ota", HTTP_POST, handleOta);
   server.on("/facezoom", HTTP_POST, handleFaceZoom);
   server.on("/mode", HTTP_POST, handleMode);
   server.on("/refresh", HTTP_POST, handleRefresh);
@@ -1961,6 +2036,8 @@ void setup() {
   networkEvents = xQueueCreate(6, sizeof(NetworkEvent));
   faceJobs=xQueueCreate(1,sizeof(FaceJob));
   faceResults=xQueueCreate(1,sizeof(FaceResult));
+  otaQueue=xQueueCreate(1,sizeof(uint8_t));
+  snprintf(otaToken,sizeof(otaToken),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());
   detailJobs=xQueueCreate(1,sizeof(DetailJob));
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
@@ -2013,13 +2090,16 @@ void loop() {
     server.handleClient();
     serviceTransition();
     serviceFaces();
+    serviceAmbient();
     return;
   }
 
   processNetworkEvents();
   server.handleClient();
+  if(otaInstalling()){delay(10);return;}
   serviceTransition();
   serviceFaces();
+  serviceAmbient();
   if (cachePending && !transition.active) { cachePending = false; persistFrame(); }
 
   if (displayMode == 1) {

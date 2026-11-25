@@ -973,6 +973,17 @@ export default {
         return serveCurrentManifest(env);
       }
       if (url.pathname === "/v1/radio/kan88/state") return kan88State(env);
+      if(url.pathname==="/v1/firmware/latest.json"){
+        const object=await env.FRAMES.get("firmware/latest.json");
+        if(!object)return jsonResponse({error:"firmware_unavailable"},{status:404});
+        return new Response(object.body,{headers:{"content-type":"application/json","content-length":String(object.size),"cache-control":"no-store"}});
+      }
+      const firmwareMatch=url.pathname.match(/^\/v1\/firmware\/([a-f0-9]{64})\.bin$/);
+      if(firmwareMatch){
+        const object=await env.FRAMES.get(`firmware/releases/${firmwareMatch[1]}.bin`);
+        if(!object)return jsonResponse({error:"firmware_unavailable"},{status:404});
+        return new Response(object.body,{headers:{"content-type":"application/octet-stream","content-length":String(object.size),"cache-control":"public,max-age=31536000,immutable"}});
+      }
       const radioDetail=url.pathname.match(/^\/v1\/detail\/radio\/([a-f0-9]{64})\.rgb565$/);
       if(radioDetail)return serveDetail(env,`detail/radio/${radioDetail[1]}.rgb565`);
       const randomDetail=url.pathname.match(/^\/v1\/detail\/fallback\/([a-f0-9]{64})\/(\d{1,4})\.rgb565$/);
