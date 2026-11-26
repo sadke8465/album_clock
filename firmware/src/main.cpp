@@ -49,7 +49,7 @@ static AmbientSettings ambientSettings;
 static uint16_t *ambientBase=nullptr,*ambientOutput=nullptr;
 static bool ambientRendered=false,ambientBaseValid=false;
 static uint32_t ambientLastDraw=0;
-#define AMBIENT_FIELDS(X) X(mode,0,5) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25)
+#define AMBIENT_FIELDS(X) X(mode,0,6) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25) X(chroma,0,100)
 static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;

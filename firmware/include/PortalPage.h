@@ -61,8 +61,8 @@ pre{background:var(--sub);padding:12px;border-radius:9px;font-size:11px;overflow
 <button class="primary" onclick="openPanel('ambient')">Explore ambient effects</button>
 </section>
 <section class="panel" data-panel="ambient" hidden>
-<h3>Ambient effects</h3><p class="caption">Responsive light over the album artwork. Try Luminous sparkle or Light sweep for more visible movement. Pure black remains dark in highlights mode. Effects pause during cover and zoom transitions.</p>
-<div class="presets"><button onclick="ambientPreset('sparkle')">✦ &nbsp; Luminous sparkle</button><button onclick="ambientPreset('bold')">✧ &nbsp; Bold sparkle</button><button onclick="ambientPreset('shimmer')">≈ &nbsp; Light sweep</button><button onclick="ambientPreset('breathe')">○ &nbsp; Breathing light</button><button onclick="ambientPreset('drift')">⋯ &nbsp; Drifting embers</button><button onclick="ambientPreset('ripple')">◎ &nbsp; Luminous ripple</button><button onclick="ambientPreset('subtle')">· &nbsp; Subtle sparkle</button><button onclick="ambientSetting('mode',0)">Off</button></div>
+<h3>Ambient effects</h3><p class="caption">Responsive light over the album artwork. Pixel shimmer animates the artwork’s own pixels in place. No white sparkle overlay; use Pixel color variation to adjust the native colors. Pure black remains dark in highlights mode. Effects pause during cover and zoom transitions.</p>
+<div class="presets"><button class="primary" onclick="ambientPreset('pixels')">✴ &nbsp; Pixel shimmer</button><button onclick="ambientPreset('sparkle')">✦ &nbsp; Luminous sparkle</button><button onclick="ambientPreset('bold')">✧ &nbsp; Bold sparkle</button><button onclick="ambientPreset('shimmer')">≈ &nbsp; Light sweep</button><button onclick="ambientPreset('breathe')">○ &nbsp; Breathing light</button><button onclick="ambientPreset('drift')">⋯ &nbsp; Drifting embers</button><button onclick="ambientPreset('ripple')">◎ &nbsp; Luminous ripple</button><button onclick="ambientPreset('subtle')">· &nbsp; Subtle sparkle</button><button onclick="ambientSetting('mode',0)">Off</button></div>
 <div id="ambientControls"></div>
 <button onclick="ambientPreset('reset')">Restore recommended settings</button>
 </section>
@@ -140,13 +140,13 @@ function openPanel(id){
  window.scrollTo(0,0);
 }
 var ambientFields=[
- ['mode','Effect',0,5,1,['Off','Sparkle','Silk shimmer','Breathing','Drifting embers','Soft ripple']],
+ ['mode','Effect',0,6,1,['Off','Sparkle','Silk shimmer','Breathing','Drifting embers','Soft ripple','Pixel shimmer']],
  ['target','Light follows',0,4,0,['Luminance / highlights','Shadows','Edges / contrast','Entire image','Saturated colors']],
  ['intensity','Intensity',0,100,68],['density','Density / wave width',1,48,34],['speed','Speed',10,200,80],
  ['size','Particle size',1,3,2],['threshold','Target threshold',0,245,40],['softness','Softness',0,100,35],
  ['palette','Light color',0,4,1,['Artwork color','White','Warm amber','Cool blue','Multicolor']],
  ['direction','Direction',0,3,0,['Right','Left','Down','Up']],
- ['blend','Blend',0,3,0,['Mix','Screen','Additive','Light & shade (waves)']],['fps','Animation frame rate',5,25,15]
+ ['blend','Blend',0,3,0,['Mix','Screen','Additive','Light & shade (waves)']],['chroma','Pixel color variation',0,100,25],['fps','Animation frame rate',5,25,15]
 ],ambientBusy=false;
 ambientFields.forEach(function(f){
  var label=document.createElement('label'),v=document.createElement('span'),control=document.createElement(f[5]?'select':'input'),id='am_'+f[0];
@@ -165,6 +165,7 @@ function sendAmbient(data){ambientBusy=true;timedFetch('/ambient',{method:'POST'
 function ambientSetting(name,value){var data=new URLSearchParams();data.set(name,value);sendAmbient(data);}
 function ambientPreset(name){
  var presets={
+ pixels:{mode:6,target:0,intensity:72,density:28,speed:100,size:1,threshold:22,softness:65,chroma:30,fps:15},
  sparkle:{mode:1,target:0,intensity:68,density:34,speed:80,size:2,threshold:40,softness:35,palette:1,direction:0,blend:0,fps:15},
  bold:{mode:1,target:0,intensity:95,density:48,speed:105,size:3,threshold:25,softness:30,palette:1,direction:0,blend:2,fps:15},
  subtle:{mode:1,target:0,intensity:25,density:18,speed:65,size:1,threshold:88,softness:70,palette:0,direction:0,blend:0,fps:15},

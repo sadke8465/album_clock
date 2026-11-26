@@ -6,7 +6,7 @@
 
 struct AmbientSettings {
   int16_t mode=1,target=0,intensity=68,density=34,speed=80,size=2,threshold=40,
-    softness=35,palette=1,direction=0,blend=0,fps=15;
+    softness=35,palette=1,direction=0,blend=0,fps=15,chroma=25;
 };
 static inline uint32_t ambientHash(uint32_t x){
   x^=x>>16;x*=0x7feb352dU;x^=x>>15;x*=0x846ca68bU;x^=x>>16;return x;
@@ -59,6 +59,49 @@ static inline uint16_t ambientLightShade(uint16_t base,int level,int weight,int 
   int keep=255-amount*65/100;
   return image565(imageR(base)*keep/255,imageG(base)*keep/255,imageB(base)*keep/255);
 }
+// Native pixels shimmer in place. No overlay, color palette or spatial motion.
+static inline uint16_t ambientPixelShimmer(uint16_t base,int amount,const AmbientSettings &s,uint32_t seed){
+  if(!base||amount<=0)return base;
+  int r=imageR(base),g=imageG(base),b=imageB(base);
+  int hi=r>g?(r>b?r:b):(g>b?g:b),lo=r<g?(r<b?r:b):(g<b?g:b);
+  // Bright colors have little headroom; darker pulses make them visible.
+  bool dim=hi>=220||(seed&1);
+  int gain=dim?256-amount*175/255:256+amount*220/255;
+  int headroom=255*256/hi;
+  if(gain>headroom)gain=headroom;
+  int dr=0,dg=0,db=0;
+  if(hi-lo>=16&&s.chroma){
+    int c=amount*s.chroma/160;
+    int phase=(seed>>8)%3;
+    dr=phase==0?c:-c/2;dg=phase==1?c:-c/2;db=phase==2?c:-c/2;
+  }
+  // Multiplication preserves black and zero channels; color variation never
+  // introduces artificial white highlights or adds a new color to black.
+  return image565(r*imageClamp(gain+dr,0,512)/256,
+                  g*imageClamp(gain+dg,0,512)/256,
+                  b*imageClamp(gain+db,0,512)/256);
+}
+static inline void ambientPixelRender(const uint16_t *base,uint16_t *out,const AmbientSettings &s,uint32_t t,int level){
+  int size=imageClamp(s.size,1,3);
+  for(int y=0;y<64;y++)for(int x=0;x<64;x++){
+    int i=y*64+x;
+    if(!base[i])continue;
+    int w=ambientWeight(base,i,s);if(!w)continue;
+    uint32_t group=(y/size)*64+x/size;
+    uint32_t identity=ambientHash(group+741);
+    uint32_t life=1200+identity%2300;
+    uint32_t elapsed=t+identity%7000;
+    uint32_t cycle=elapsed/life;
+    uint32_t seed=ambientHash(identity+cycle*1381);
+    if((seed>>16)%100>=(unsigned)(s.density*2))continue;
+    int phase=(elapsed%life)*255/life;
+    int smooth=ambientEnvelope(phase);
+    int triangle=phase<128?phase*2:(255-phase)*2;
+    int pulse=(triangle*(100-s.softness)+smooth*s.softness)/100;
+    int amount=level*w*pulse/65025;
+    out[i]=ambientPixelShimmer(base[i],amount,s,seed);
+  }
+}
 // Render onto a separate output buffer. The original artwork is immutable.
 // A deterministic time-based effect avoids persistent particle allocations.
 static inline void ambientRender(const uint16_t *base,uint16_t *out,const AmbientSettings &s,uint32_t ms){
@@ -66,6 +109,7 @@ static inline void ambientRender(const uint16_t *base,uint16_t *out,const Ambien
   if(!s.mode||!s.intensity)return;
   uint32_t t=(uint32_t)((uint64_t)ms*s.speed/100);
   int level=s.intensity*255/100;
+  if(s.mode==6){ambientPixelRender(base,out,s,t,level);return;}
   if(s.mode==1||s.mode==4){
     int count=s.density;
     for(int p=0;p<count;p++){

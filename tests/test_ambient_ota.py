@@ -20,7 +20,7 @@ int main(){
     AmbientSettings a;
     a.mode=0;ambientRender(base,out,a,1000);assert(!memcmp(base,out,sizeof(base)));
     a.intensity=70;a.density=48;a.size=3;
-    for(int mode=1;mode<=5;mode++){
+    for(int mode=1;mode<=6;mode++){
         a.mode=mode;ambientRender(base,out,a,1323);ambientRender(base,second,a,2354);
         assert(!memcmp(base,copy,sizeof(base)));
         assert(memcmp(out,second,sizeof(out)));
@@ -45,6 +45,19 @@ int main(){
     assert(imageR(out[32])<230);
     assert(memcmp(out,second,sizeof(out)));
     for(int i=0;i<4096;i++)if(i%64<16)assert(out[i]==0&&second[i]==0);
+    // Pixel mode must modulate native colors rather than introduce white.
+    for(int i=0;i<4096;i++)base[i]=i%64<16?0:image565(160,0,0);
+    memcpy(copy,base,sizeof(base));
+    a=AmbientSettings{};a.mode=6;a.density=48;a.intensity=90;a.chroma=50;a.target=3;
+    ambientRender(base,out,a,1234);ambientRender(base,second,a,2345);
+    assert(memcmp(out,second,sizeof(out)));
+    assert(!memcmp(base,copy,sizeof(base)));
+    int nativeChanged=0;
+    for(int i=0;i<4096;i++){
+        if(i%64<16)assert(!out[i]&&!second[i]);
+        else{assert(imageG(out[i])==0&&imageB(out[i])==0);if(out[i]!=base[i])nativeChanged++;}
+    }
+    assert(nativeChanged>50);
     assert(otaNewer("3.8.1-wiim","3.8.0-wiim"));
     assert(otaNewer("3.10.0-wiim","3.9.9-wiim"));
     assert(!otaNewer("3.7.9-wiim","3.8.0-wiim"));

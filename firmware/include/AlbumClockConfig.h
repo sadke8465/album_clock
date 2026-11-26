@@ -25,7 +25,7 @@
 // mDNS hostname for the persistent config portal: http://albumclock.local
 #define MDNS_HOSTNAME "albumclock"
 
-#define FIRMWARE_VERSION "3.8.1-wiim"
+#define FIRMWARE_VERSION "3.8.2-wiim"
 
 // ---------------------------------------------------------------------------
 // Frame + timing
