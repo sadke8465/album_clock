@@ -6,7 +6,8 @@
 
 struct AmbientSettings {
   int16_t mode=1,target=0,intensity=68,density=34,speed=80,size=2,threshold=40,
-    softness=35,palette=1,direction=0,blend=0,fps=15,chroma=25;
+    softness=35,palette=1,direction=0,blend=0,fps=15,chroma=25,
+    micgain=100,micgate=12,micattack=35,micrelease=240;
 };
 static inline uint32_t ambientHash(uint32_t x){
   x^=x>>16;x*=0x7feb352dU;x^=x>>15;x*=0x846ca68bU;x^=x>>16;return x;
@@ -23,14 +24,31 @@ static inline int ambientWeight(const uint16_t *base,int i,const AmbientSettings
       int dy=y<63?abs(l-ambientLuma(base[i+64])):0;
       w=imageClamp((dx+dy)*3,0,255);break;
     }
-    case 4:{int r=imageR(v),g=imageG(v),b=imageB(v);
-      int hi=r>g?(r>b?r:b):(g>b?g:b),lo=r<g?(r<b?r:b):(g<b?g:b);w=hi-lo;break;}
+    case 4:case 5:case 6:{int r=imageR(v),g=imageG(v),b=imageB(v);
+      int hi=r>g?(r>b?r:b):(g>b?g:b),lo=r<g?(r<b?r:b):(g<b?g:b);int chroma=hi-lo;
+      w=s.target==4?chroma:s.target==5?(l>chroma?l:chroma):hi;break;}
   }
   if(s.target==3)return 255;
   if(w<=s.threshold)return 0;
   // The threshold excludes unwanted pixels; a weighted floor makes the
   // retained highlights visible even at low panel brightness.
   return 96+(w-s.threshold)*159/(255-s.threshold);
+}
+// Audio changes the native pixel's gain, never the palette, saturation or
+// position. The quiet side of the pulse provides headroom even for white.
+static inline void ambientAudioRender(const uint16_t *base,uint16_t *out,const AmbientSettings &s,int audioLevel,int level){
+  if(audioLevel<0)return; // mic absent or stale: preserve the original artwork
+  int pulse=imageClamp(audioLevel,0,255)-128;
+  for(int i=0;i<4096;i++){
+    uint16_t v=base[i];if(!v)continue;
+    int weight=ambientWeight(base,i,s);if(!weight)continue;
+    int r=imageR(v),g=imageG(v),b=imageB(v),hi=r>g?(r>b?r:b):(g>b?g:b);
+    if(!hi)continue;
+    int gain=256+level*weight*pulse*(pulse<0?65:90)/(255*128*100);
+    // A shared gain (limited by the brightest channel) preserves hue.
+    gain=imageClamp(gain,0,255*256/hi);
+    out[i]=image565(r*gain/256,g*gain/256,b*gain/256);
+  }
 }
 static inline int ambientEnvelope(int phase){
   int t=phase<128?phase*2:(255-phase)*2;
@@ -104,11 +122,12 @@ static inline void ambientPixelRender(const uint16_t *base,uint16_t *out,const A
 }
 // Render onto a separate output buffer. The original artwork is immutable.
 // A deterministic time-based effect avoids persistent particle allocations.
-static inline void ambientRender(const uint16_t *base,uint16_t *out,const AmbientSettings &s,uint32_t ms){
+static inline void ambientRender(const uint16_t *base,uint16_t *out,const AmbientSettings &s,uint32_t ms,int audioLevel=-1){
   memcpy(out,base,4096*sizeof(uint16_t));
   if(!s.mode||!s.intensity)return;
   uint32_t t=(uint32_t)((uint64_t)ms*s.speed/100);
   int level=s.intensity*255/100;
+  if(s.mode==7){ambientAudioRender(base,out,s,audioLevel,level);return;}
   if(s.mode==6){ambientPixelRender(base,out,s,t,level);return;}
   if(s.mode==1||s.mode==4){
     int count=s.density;

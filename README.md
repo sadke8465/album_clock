@@ -195,6 +195,24 @@ cd worker && npm install
 npm run typecheck && npm test
 ```
 
+## Audio pulse (LED album art)
+
+In the local remote, choose **Ambient → Audio pulse**. This is an artwork
+effect, separate from the full-screen audio spectrum and Pokémon modes. It
+works on live WiiM/Apple Music artwork, Kan 88 covers and random artwork,
+including while zooming or transitioning. Highlights and saturated colors
+follow the microphone envelope, with quiet passages dimming the selected
+pixels and louder passages restoring or boosting their original brightness.
+Black pixels stay black; the artwork's hue is preserved.
+
+Choose a target (combined highlights and saturated colors, luminance,
+saturation, peak RGB, or the other existing masks) and adjust intensity,
+threshold, mic sensitivity, noise gate, attack, release and frame rate. The
+remote has a live level meter. Microphone samples are processed on the ESP32;
+no PCM is sent over Wi-Fi. If the mic is unavailable, the original image
+remains visible. Existing ambient settings and Pokémon mode are unaffected
+until you choose Audio pulse.
+
 ## Pokémon mode (LED only)
 
 Firmware 4.0 adds a third display mode in the local remote. The mode stays

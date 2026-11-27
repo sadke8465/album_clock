@@ -14,6 +14,7 @@
 #include <Wire.h>
 #include <math.h>
 #include "driver/i2s.h"
+#include "AudioPulse.h"
 
 #define AUD_I2C_SDA 47
 #define AUD_I2C_SCL 48
@@ -116,10 +117,26 @@ inline bool begin() {
   pins.ws_io_num = AUD_I2S_WS;
   pins.data_out_num = I2S_PIN_NO_CHANGE;
   pins.data_in_num = AUD_I2S_DIN;
-  if (i2s_set_pin(I2S_NUM_0, &pins) != ESP_OK) return false;
+  if (i2s_set_pin(I2S_NUM_0, &pins) != ESP_OK) {i2s_driver_uninstall(I2S_NUM_0);return false;}
   i2s_zero_dma_buffer(I2S_NUM_0);
   initBands();
   return true;
+}
+
+// Nonblocking level-only capture for album art. Drain at most four queued DMA
+// blocks so zoom/transition rendering can't leave the mic several beats behind.
+// DC-remove each channel independently and use the strongest valid channel.
+inline bool readLevel(float &rms) {
+  bool valid=false;
+  for(int block=0;block<4;block++){
+    size_t got=0;
+    i2s_read(I2S_NUM_0,sampleBuf,sizeof(sampleBuf),&got,0);
+    int n=got/4;if(n<32)break;if(n>AUD_SAMPLES)n=AUD_SAMPLES;
+    rms=stereoMicRms(sampleBuf,n);valid=true;
+    if(got<sizeof(sampleBuf))break;
+  }
+  if(valid)lastRms=rms;
+  return valid;
 }
 
 // Capture a block and fill bands[0..AUD_BANDS-1] with smoothed 0..1 magnitudes.

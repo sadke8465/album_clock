@@ -11,7 +11,7 @@ const { chromium } = require('playwright');
   const browser = await chromium.launch({executablePath: process.env.POKEMON_CHROMIUM_EXECUTABLE || undefined, headless: true, args: ['--no-sandbox']});
   try {
     const page = await browser.newPage({viewport: {width:390,height:844},deviceScaleFactor:1});
-    let mode = 2; const errors = [], calls = [];
+    let mode = 2, ambient={am_mode:0}; const errors = [], calls = [];
     const cells = [
       {id:25,name:'Pikachu',game:12,frames:58,variant:0,pinned:false,pending:false,favorite:true},
       {id:6,name:'Charizard',game:5,frames:32,variant:1,pinned:true,pending:false,favorite:false},
@@ -23,10 +23,12 @@ const { chromium } = require('playwright');
     await page.route('http://albumclock.local/**', async route => {
       const u = new URL(route.request().url());
       if(u.pathname==='/')return route.fulfill({body:html,contentType:'text/html'});
-      if(u.pathname==='/status')return route.fulfill({json:{display_mode:mode,pokemon:mode===2?pk:undefined,wifi_connected:true,fw:'4.0.0-wiim',ip:'192.168.1.8',brightness:40,pack_count:279,playback:'idle',service_status:'Online',display_generation:1,am_mode:0}});
+      if(u.pathname==='/status')return route.fulfill({json:{display_mode:mode,pokemon:mode===2?pk:undefined,wifi_connected:true,fw:'4.1.0-wiim',ip:'192.168.1.8',brightness:40,pack_count:279,playback:'idle',service_status:'Online',display_generation:1,...ambient}});
       if(u.pathname==='/frame.bin')return route.fulfill({body:Buffer.alloc(8192),contentType:'application/octet-stream'});
       if(u.pathname==='/pokemon/catalog')return route.fulfill({json:[{id:25,name:'Pikachu'},{id:133,name:'Eevee'},{id:6,name:'Charizard'}]});
       if(u.pathname==='/mode'){mode=Number(new URLSearchParams(route.request().postData()).get('value'));return route.fulfill({body:'mode updated'});}
+      if(u.pathname==='/ambient'){for(const [key,value] of new URLSearchParams(route.request().postData()))ambient['am_'+key]=Number(value);return route.fulfill({body:'Ambient settings saved'});}
+      if(u.pathname==='/album-audio-level')return route.fulfill({json:{level:178,ready:true,failed:false}});
       calls.push([u.pathname,route.request().postData()]);return route.fulfill({body:'ok'});
     });
     await page.goto('http://albumclock.local/');
@@ -41,6 +43,15 @@ const { chromium } = require('playwright');
     assert.match(await page.locator('#pkResults').innerText(),/Eevee/);
     await page.selectOption('#mode','0');await page.waitForSelector('#appTitle:text("Album Clock")');
     assert.deepEqual(await page.locator('.tabs button:visible').allTextContents(),['Display','Ambient','Zoom','Image','Transitions','Device']);
-    assert.deepEqual(errors,[]);console.log('Pokémon mobile remote: mode isolation, grid actions, and search passed');
+    await page.getByRole('button',{name:'Ambient',exact:true}).click();
+    await page.getByRole('button',{name:'♫ Audio pulse',exact:true}).click();
+    await page.waitForSelector('#am_micgain:visible');
+    assert.equal(await page.locator('#am_mode').inputValue(),'7');
+    assert.equal(await page.locator('#am_target').inputValue(),'5');
+    assert.equal(await page.locator('#am_density').isVisible(),false);
+    await page.waitForFunction(()=>document.getElementById('micLevel').value===178);
+    await page.selectOption('#am_mode','0');
+    await page.waitForSelector('#micMeter',{state:'hidden'});
+    assert.deepEqual(errors,[]);console.log('Pokémon and Audio Pulse mobile remote: mode isolation, grid actions, search, audio preset and mic meter passed');
   } finally {await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1);});

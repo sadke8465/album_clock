@@ -17,6 +17,7 @@
 
 #include "AlbumClockConfig.h"
 #include "AudioReactive.h"
+#include "AudioPulse.h"
 #include "PortalPage.h"
 #include "ImageAdjustments.h"
 #include "AmbientEffects.h"
@@ -51,7 +52,7 @@ static AmbientSettings ambientSettings;
 static uint16_t *ambientBase=nullptr,*ambientOutput=nullptr;
 static bool ambientRendered=false,ambientBaseValid=false;
 static uint32_t ambientLastDraw=0;
-#define AMBIENT_FIELDS(X) X(mode,0,6) X(target,0,4) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25) X(chroma,0,100)
+#define AMBIENT_FIELDS(X) X(mode,0,7) X(target,0,6) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25) X(chroma,0,100) X(micgain,10,250) X(micgate,0,100) X(micattack,10,200) X(micrelease,50,1200)
 static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
@@ -120,6 +121,10 @@ static volatile uint8_t displayMode = 0;  // 0 = album art, 1 = audio reactive, 
 static PokemonMode pokemon;
 static bool audioReady = false;
 static bool audioFailed = false;
+static AudioPulse albumPulse;
+static bool albumMicActive=false;
+static int albumAudioLevel=-1;
+static uint32_t albumMicPollAt=0,albumMicSampleAt=0;
 static bool apMode = false;
 static bool serverStarted = false;
 static bool hasFrame = false;
@@ -268,7 +273,8 @@ static void draw565(int x, int y, uint16_t value);
 // Ambient is a final compositing pass, not a separate display mode. All
 // artwork frames (zoom, transition, or still) share the same wall-clock phase.
 static void presentAmbientBase(uint32_t now) {
-  ambientRender(ambientBase,ambientOutput,ambientSettings,now);
+  int level=albumMicActive&&now-albumMicSampleAt<=250?albumAudioLevel:-1;
+  ambientRender(ambientBase,ambientOutput,ambientSettings,now,level);
   ambientLastDraw=now;
   ambientRendered=true;
   for(int y=0;y<FRAME_HEIGHT;y++)for(int x=0;x<FRAME_WIDTH;x++)
@@ -788,7 +794,7 @@ void renderSpectrum() {
   }
 }
 
-void serviceAudio() {
+static bool ensureAudioReady(){
   if (!audioReady && !audioFailed) {
     if (audio::begin()) {
       audioReady = true;
@@ -798,7 +804,28 @@ void serviceAudio() {
       Serial.println("Audio: mic init failed (ES7210 not responding)");
     }
   }
-  if (audioReady) {
+  return audioReady;
+}
+
+static void serviceAlbumAudio(){
+  if(displayMode!=0||ambientSettings.mode!=7||!ambientSettings.intensity||testCard||otaInstalling()){
+    if(albumMicActive){albumPulse.reset();albumAudioLevel=-1;albumMicActive=false;}
+    return;
+  }
+  if(!ensureAudioReady())return;
+  uint32_t now=millis();
+  if(!albumMicActive){albumMicActive=true;albumPulse.reset();albumAudioLevel=-1;albumMicPollAt=now-16;albumMicSampleAt=now;}
+  if(now-albumMicPollAt<16)return;
+  albumMicPollAt=now;
+  float rms=0;
+  if(audio::readLevel(rms)){
+    albumMicSampleAt=now;
+    albumAudioLevel=albumPulse.update(rms,now,ambientSettings.micgain,ambientSettings.micgate,ambientSettings.micattack,ambientSettings.micrelease);
+  }else if(now-albumMicSampleAt>250){albumPulse.reset();albumAudioLevel=-1;}
+}
+
+void serviceAudio() {
+  if (ensureAudioReady()) {
     renderSpectrum();
   } else {
     // Mic unavailable: gentle idle sweep so the mode is visibly active.
@@ -1750,6 +1777,8 @@ void handleStatus() {
   j += "\"zoom_smoothness\":" + String(zoomSmoothness) + ",";
   j += "\"zoom_render_ms\":" + String(zoomRenderMs) + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
+  j += "\"audio_failed\":" + String(audioFailed ? "true" : "false") + ",";
+  j += "\"album_audio_level\":" + String(albumAudioLevel) + ",";
   j += "\"audio_rms\":" + String((int)audio::rms()) + ",";
   j += "\"has_frame\":" + String(hasFrame ? "true" : "false") + ",";
   j += "\"playback\":\"" + jsonEscape(remoteState.playback) + "\",";
@@ -1793,9 +1822,17 @@ void handleAmbient(){
   if(server.hasArg(#name)||server.hasArg("reset"))prefs.putShort("am_" #name,ambientSettings.name);
   AMBIENT_FIELDS(SET_AMBIENT)
 #undef SET_AMBIENT
+  serviceAlbumAudio();
   ambientRendered=false;
   if(displayMode==0)drawFrame();
   server.send(200,"text/plain","Ambient settings saved");
+}
+
+void handleAlbumAudioLevel(){
+  if(displayMode!=0||ambientSettings.mode!=7){server.send(409,"text/plain","Audio pulse is not active");return;}
+  int level=albumMicActive&&millis()-albumMicSampleAt<=250?albumAudioLevel:-1;
+  server.sendHeader("Cache-Control","no-store");
+  server.send(200,"application/json",String("{\"level\":")+level+",\"ready\":"+(audioReady?"true":"false")+",\"failed\":"+(audioFailed?"true":"false")+"}");
 }
 
 void handleOta(){
@@ -2071,6 +2108,7 @@ void setupRoutes() {
   server.on("/fade", HTTP_POST, handleFade);
   server.on("/image", HTTP_POST, handleImageAdjustments);
   server.on("/ambient", HTTP_POST, handleAmbient);
+  server.on("/album-audio-level", HTTP_GET, handleAlbumAudioLevel);
   server.on("/ota", HTTP_POST, handleOta);
   server.on("/facezoom", HTTP_POST, handleFaceZoom);
   server.on("/mode", HTTP_POST, handleMode);
@@ -2207,6 +2245,7 @@ void loop() {
   if (apMode) {
     dnsServer.processNextRequest();
     server.handleClient();
+    serviceAlbumAudio();
     if(displayMode==2){pokemon.networkStep(nullptr,sha256Hex,fsMutex);pokemon.service(draw565);delay(2);return;}
     serviceTransition();
     serviceFaces();
@@ -2216,6 +2255,7 @@ void loop() {
 
   processNetworkEvents();
   server.handleClient();
+  serviceAlbumAudio();
   if(otaInstalling()){delay(10);return;}
   if(displayMode==2){pokemon.service(draw565);if(WiFi.status()!=WL_CONNECTED&&millis()-lastReconnectAttempt>=10000){lastReconnectAttempt=millis();WiFi.reconnect();}delay(2);return;}
   serviceTransition();

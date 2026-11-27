@@ -67,7 +67,9 @@ pre{background:var(--sub);padding:12px;border-radius:9px;font-size:11px;overflow
 <button class="primary" onclick="openPanel('ambient')">Explore ambient effects</button>
 </section>
 <section class="panel" data-panel="ambient" hidden>
-<h3>Ambient effects</h3><p class="caption">Responsive light over the album artwork. Pixel shimmer animates the artwork’s own pixels in place. No white sparkle overlay; use Pixel color variation to adjust the native colors. Pure black remains dark in highlights mode. Effects pause during cover and zoom transitions.</p>
+<h3>Ambient effects</h3><p class="caption">Responsive light over the album artwork, including during zoom and cover changes. Audio pulse makes the artwork's own highlights and colors brighten and dim with the microphone, without an overlay.</p>
+<button class="primary" onclick="ambientPreset('audio')">♫ &nbsp; Audio pulse</button>
+<div id="micMeter" class="note" hidden><label for="micLevel">Microphone level <span id="micStatus">Listening…</span></label><progress id="micLevel" max="255" value="0" style="width:100%;accent-color:var(--accent)"></progress><small>Audio is processed locally. Adjust sensitivity and noise gate until the highlights respond to the music.</small></div>
 <div class="presets"><button class="primary" onclick="ambientPreset('pixels')">✴ &nbsp; Pixel shimmer</button><button onclick="ambientPreset('sparkle')">✦ &nbsp; Luminous sparkle</button><button onclick="ambientPreset('bold')">✧ &nbsp; Bold sparkle</button><button onclick="ambientPreset('shimmer')">≈ &nbsp; Light sweep</button><button onclick="ambientPreset('breathe')">○ &nbsp; Breathing light</button><button onclick="ambientPreset('drift')">⋯ &nbsp; Drifting embers</button><button onclick="ambientPreset('ripple')">◎ &nbsp; Luminous ripple</button><button onclick="ambientPreset('subtle')">· &nbsp; Subtle sparkle</button><button onclick="ambientSetting('mode',0)">Off</button></div>
 <div id="ambientControls"></div>
 <button onclick="ambientPreset('reset')">Restore recommended settings</button>
@@ -187,31 +189,36 @@ function pkUpdate(s){pkState=s;if(!s)return;pkFields.forEach(function(f){var c=$
 function pkPreset(name){var base={layout:0,game:12,generation:0,type:0,stage:0,legend:0,selection:0,shiny:0,facing:0,animatedOnly:1,interval:45,speed:100,scale:90,spacing:1,background:0,palette:0,shadow:0,outline:0,glow:0,sparkle:0,labels:0,together:0,staticMotion:0,colorA:0,colorB:4226};var presets={classic:{},gameboy:{game:5,palette:1},shiny:{game:0,layout:2,shiny:2,shinyChance:15},battle:{layout:1,game:12,facing:2,background:4,shadow:1,colorA:2081,colorB:14951},retro:{layout:2,game:5,spacing:2},box:{layout:4,game:0,scale:95,interval:90},evolution:{layout:7,game:12,selection:4,specific:1},cross:{layout:2,game:0,selection:2,specific:25,animatedOnly:0},ambient:{game:0,speed:60,glow:30,sparkle:25,background:2}};if(name==='reset')pkRequest('/pokemon/settings',{reset:1});else pkRequest('/pokemon/settings',Object.assign(base,presets[name]||{}));}
 setInterval(function(){if(currentDisplayMode===2&&!document.hidden)drawFrame();},650);
 var ambientFields=[
- ['mode','Effect',0,6,1,['Off','Sparkle','Silk shimmer','Breathing','Drifting embers','Soft ripple','Pixel shimmer']],
- ['target','Light follows',0,4,0,['Luminance / highlights','Shadows','Edges / contrast','Entire image','Saturated colors']],
+ ['mode','Effect',0,7,1,['Off','Sparkle','Silk shimmer','Breathing','Drifting embers','Soft ripple','Pixel shimmer','Audio pulse (microphone)']],
+ ['target','Light follows',0,6,0,['Luminance / highlights','Shadows','Edges / contrast','Entire image','Saturated colors','Highlights + saturated colors','Brightest RGB channel']],
  ['intensity','Intensity',0,100,68],['density','Density / wave width',1,48,34],['speed','Speed',10,200,80],
  ['size','Particle size',1,3,2],['threshold','Target threshold',0,245,40],['softness','Softness',0,100,35],
  ['palette','Light color',0,4,1,['Artwork color','White','Warm amber','Cool blue','Multicolor']],
  ['direction','Direction',0,3,0,['Right','Left','Down','Up']],
- ['blend','Blend',0,3,0,['Mix','Screen','Additive','Light & shade (waves)']],['chroma','Pixel color variation',0,100,25],['fps','Animation frame rate',5,25,15]
+ ['blend','Blend',0,3,0,['Mix','Screen','Additive','Light & shade (waves)']],['chroma','Pixel color variation',0,100,25],['fps','Animation frame rate',5,25,15],
+ ['micgain','Mic sensitivity (%)',10,250,100],['micgate','Noise gate',0,100,12],['micattack','Attack (ms)',10,200,35],['micrelease','Release (ms)',50,1200,240]
 ],ambientBusy=false;
 ambientFields.forEach(function(f){
  var label=document.createElement('label'),v=document.createElement('span'),control=document.createElement(f[5]?'select':'input'),id='am_'+f[0];
- label.htmlFor=id;label.textContent=f[1];control.id=id;
+ label.htmlFor=id;label.id='al_'+f[0];label.textContent=f[1];control.id=id;
  if(f[5])f[5].forEach(function(text,index){var option=document.createElement('option');option.value=index;option.textContent=text;control.appendChild(option);});
  else{control.type='range';control.min=f[2];control.max=f[3];control.step=1;v.id='av_'+f[0];v.textContent=f[4];label.appendChild(v);control.oninput=function(){v.textContent=control.value;};}
  control.value=f[4];control.onchange=function(){ambientSetting(f[0],control.value);};
  $('ambientControls').appendChild(label);$('ambientControls').appendChild(control);
 });
+function audioAmbientControls(){var audio=Number($('am_mode').value)===7;var common=['mode','target','intensity','threshold','fps'];ambientFields.forEach(function(f){var show=common.includes(f[0])||(audio?f[0].startsWith('mic'):!f[0].startsWith('mic'));$('al_'+f[0]).style.display=show?'':'none';$('am_'+f[0]).style.display=show?'':'none';});$('micMeter').hidden=!audio;}
+audioAmbientControls();
+var micMeterBusy=false;setInterval(function(){if(document.hidden||currentDisplayMode!==0||Number($('am_mode').value)!==7||micMeterBusy)return;var panel=document.querySelector('[data-panel="ambient"]');if(!panel.hidden){micMeterBusy=true;timedFetch('/album-audio-level',{},1500).then(function(r){if(!r.ok)throw Error('Not active');return r.json();}).then(function(s){$('micLevel').value=Math.max(0,s.level);$('micStatus').textContent=s.failed?'Microphone unavailable':s.level<0?'Waiting for microphone':Math.round(s.level*100/255)+'%';}).catch(function(){$('micStatus').textContent='No response';}).finally(function(){micMeterBusy=false;});}drawFrame();},750);
 function notice(t){$('notice').textContent=t;clearTimeout(notice.timer);notice.timer=setTimeout(function(){$('notice').textContent='';},4500);}
 function sendAmbient(data){ambientBusy=true;timedFetch('/ambient',{method:'POST',body:data},5000)
  .then(function(r){if(!r.ok)throw Error('Ambient '+r.status);return r.text();})
  .then(function(t){notice(t);drawFrame();})
  .catch(function(e){notice(e.message);})
  .finally(function(){ambientBusy=false;loadStatus();});}
-function ambientSetting(name,value){var data=new URLSearchParams();data.set(name,value);sendAmbient(data);}
+function ambientSetting(name,value){if(name==='mode'&&Number(value)===7){ambientPreset('audio');return;}if(name==='mode')audioAmbientControls();var data=new URLSearchParams();data.set(name,value);sendAmbient(data);}
 function ambientPreset(name){
  var presets={
+ audio:{mode:7,target:5,intensity:85,threshold:100,fps:25},
  pixels:{mode:6,target:0,intensity:72,density:28,speed:100,size:1,threshold:22,softness:65,chroma:30,fps:15},
  sparkle:{mode:1,target:0,intensity:68,density:34,speed:80,size:2,threshold:40,softness:35,palette:1,direction:0,blend:0,fps:15},
  bold:{mode:1,target:0,intensity:95,density:48,speed:105,size:3,threshold:25,softness:30,palette:1,direction:0,blend:2,fps:15},
@@ -281,7 +288,7 @@ function loadStatus(){clearTimeout(statusTimer);if(document.hidden||statusBusy){
  $('otaBar').style.display=otaState===4||otaState===6?'block':'none';$('otaBar').value=s.ota_progress||0;
  $('otaCheck').disabled=!s.wifi_connected||!otaToken||[1,4,6].includes(otaState);
  $('otaInstall').disabled=otaState!==2||!s.wifi_connected;
- if(!ambientBusy)ambientFields.forEach(function(f){var id='am_'+f[0];if(document.activeElement.id!==id&&s[id]!=null){$(id).value=s[id];if(!f[5])$('av_'+f[0]).textContent=s[id];}});
+ if(!ambientBusy){ambientFields.forEach(function(f){var id='am_'+f[0];if(document.activeElement.id!==id&&s[id]!=null){$(id).value=s[id];if(!f[5])$('av_'+f[0]).textContent=s[id];}});audioAmbientControls();}
  $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!(s.face_eligible||s.face_apple_music)||!s.face_count||s.transition_active;
  $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
  $('textzoom').checked=!!s.text_enabled;$('saliency').checked=!!s.saliency_enabled;$('nextText').disabled=!s.text_enabled||!s.text_count||s.transition_active;
