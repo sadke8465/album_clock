@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
 import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, radioReleaseQuality, radioAlbumKey, radioMarket, type RadioTrack } from "./radio-match";
+import { pokemonAssets, preparePokemonSprite, POKEMON_SIZES, MAX_PACKET } from "./pokemon";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -1146,6 +1147,23 @@ export default {
         return serveCurrentManifest(env);
       }
       if (url.pathname === "/v1/radio/kan88/state") return kan88State(env);
+      const pokemonMatch=url.pathname.match(/^\/v1\/pokemon\/sprite\/(\d{1,2})\/(\d{1,3})\/(\d)\/(16|22|32|64)\.pka$/);
+      if(pokemonMatch){
+        const game=Number(pokemonMatch[1]),id=Number(pokemonMatch[2]),variant=Number(pokemonMatch[3]),size=Number(pokemonMatch[4]),animated=url.searchParams.get('animated')==='1';
+        if(!POKEMON_SIZES.includes(size as typeof POKEMON_SIZES[number])||!pokemonAssets(game,id,variant,animated).length)
+          return jsonResponse({error:'sprite_unavailable'},{status:404});
+        const key=`pokemon/pka1/${game}/${id}/${variant}/${size}/${Number(animated)}.pka`;
+        let object=await env.FRAMES.get(key);
+        if(!object){
+          const packet=await preparePokemonSprite(game,id,variant,size,animated);
+          if(!packet)return jsonResponse({error:'sprite_unavailable'},{status:404});
+          const digest=await hashBytes(packet);
+          await env.FRAMES.put(key,packet,{httpMetadata:{contentType:'application/octet-stream'},customMetadata:{sha256:digest}});
+          return new Response(request.method==='HEAD'?null:packet,{headers:{'content-type':'application/octet-stream','content-length':String(packet.length),'x-pokemon-sha256':digest,'cache-control':'public,max-age=31536000,immutable',...corsHeaders()}});
+        }
+        if(object.size>MAX_PACKET||!object.customMetadata?.sha256)return jsonResponse({error:'invalid_sprite'},{status:502});
+        return new Response(request.method==='HEAD'?null:object.body,{headers:{'content-type':'application/octet-stream','content-length':String(object.size),'x-pokemon-sha256':object.customMetadata.sha256,'cache-control':'public,max-age=31536000,immutable',...corsHeaders()}});
+      }
       if(url.pathname==="/v1/firmware/latest.json"){
         const object=await env.FRAMES.get("firmware/latest.json");
         if(!object)return jsonResponse({error:"firmware_unavailable"},{status:404});

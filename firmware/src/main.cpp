@@ -24,6 +24,7 @@
 #include "FaceZoom.h"
 #include "SmartRegions.h"
 #include "ZoomSourcePolicy.h"
+#include "PokemonMode.h"
 #include "human_face_detect_msr01.hpp"
 #include "WiimSource.h"
 
@@ -115,7 +116,8 @@ static bool gammaOn = DEFAULT_FADE_GAMMA;
 static uint8_t fieldOld[FRAME_WIDTH * FRAME_HEIGHT];
 static uint8_t fieldNew[FRAME_WIDTH * FRAME_HEIGHT];
 static float gammaLUT[256];
-static uint8_t displayMode = 0;  // 0 = album art, 1 = audio reactive
+static volatile uint8_t displayMode = 0;  // 0 = album art, 1 = audio reactive, 2 = Pokémon
+static PokemonMode pokemon;
 static bool audioReady = false;
 static bool audioFailed = false;
 static bool apMode = false;
@@ -285,7 +287,7 @@ static void presentArtwork(const uint16_t *source) {
 }
 
 void drawFrame() {
-  if (!display) return;
+  if (!display||displayMode==2) return;
   if (testCard) {
     ambientRendered=false;
     ambientBaseValid=false;
@@ -542,6 +544,7 @@ static void runFaceDetection(FaceJob job, bool radio) {
     vTaskDelay(1);
 }
 static void requestFaceDetection() {
+  if(displayMode==2)return;
   if(!faceReady||!faceEnabled||!faceArtworkEligible(faceLiveMusic,faceRandomArtwork)||
      (faceRandomArtwork&&playbackActive)||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||
      faceTriedId==faceArtworkId||faceScanAttempts>=3||
@@ -570,6 +573,7 @@ static void serviceFaceJob(bool musicAllowed,bool idleAllowed,bool radio=false) 
   else {free(job.pixels);FaceResult result{};result.id=job.id;xQueueOverwrite(faceResults,&result);}
 }
 static void requestArtworkDetail(){
+  if(displayMode==2)return;
   if(!detailJobs||faceDetailed||faceDetailRequested||faceDetailAttempts>=3||
      (faceDetailRetryAt&&(int32_t)(millis()-faceDetailRetryAt)<0)||!faceDetailPath.length()||
      (!quadrantEnabled&&!textEnabled&&!(faceEnabled&&faceArtworkEligible(faceLiveMusic,faceRandomArtwork))))return;
@@ -906,7 +910,7 @@ void loadSettings() {
   desatPct = constrain(prefs.getUChar("desat", DEFAULT_DESAT_PCT), 0, 100);
   gammaOn = prefs.getUChar("gamma", DEFAULT_FADE_GAMMA) != 0;
   displayMode = prefs.getUChar("mode", 0);
-  if (displayMode > 1) displayMode = 0;
+  if (displayMode > 2) displayMode = 0;
 
 #ifdef LOCAL_WIFI_SSID
   // Optional compile-time override for development (LocalSecrets.h, untracked).
@@ -1347,24 +1351,44 @@ static bool readServiceJson(const String &path, String &json,uint16_t timeout=12
   return ok;
 }
 
+static uint8_t *fetchPokemonSprite(const PokemonKey &key,size_t &size){
+  size=0;HTTPClient http;WiFiClient plain;WiFiClientSecure secure;
+  const String path="/v1/pokemon/sprite/"+String(key.game)+"/"+String(key.dex)+"/"+String(key.variant)+"/"+String(key.size)+".pka?animated="+String(key.animated);
+  // Pokémon uses the verified Worker even when the album source is a legacy URL.
+  if(!beginHttp(http,plain,secure,originFromUrl(DEFAULT_FRAME_URL)+path))return nullptr;
+  const char *headers[]={"x-pokemon-sha256"};http.collectHeaders(headers,1);http.setTimeout(18000);http.setConnectTimeout(4000);
+  const int code=http.GET(),length=http.getSize();const String digest=http.header("x-pokemon-sha256");
+  if(code!=200||length<17||length>int(PK_MAX_PACKET)||digest.length()!=64){http.end();return nullptr;}
+  uint8_t *data=(uint8_t*)heap_caps_malloc(length,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);if(!data){http.end();return nullptr;}
+  auto stream=http.getStreamPtr();size_t n=0;const uint32_t start=millis();
+  while(n<size_t(length)&&millis()-start<18000&&displayMode==2){int available=stream->available();
+    if(available>0){int got=stream->read(data+n,min(size_t(available),size_t(length)-n));if(got>0)n+=got;}
+    else if(!http.connected())break;else vTaskDelay(pdMS_TO_TICKS(10));}
+  http.end();PokemonPacket pkt;if(n!=size_t(length)||sha256Hex(data,n)!=digest||!pkt.parse(data,n)||(key.animated&&pkt.frames<2)){free(data);return nullptr;}
+  size=n;return data;
+}
+
 void networkTask(void *) {
   uint32_t lastPoll = 0, lastRadioPoll = 0, lastPackCheck = 0, idleSince = 0;
   uint32_t generation = 0;
   String shownKey, radioHash, knownPack = localPack.version;
   RemoteSnapshot pack;
-  bool active = false, wasRadio = false, lastWasMusic=false,lastWasIdle=false;
+  bool active = false, wasRadio = false, lastWasMusic=false,lastWasIdle=false,wasPokemon=false;
   uint32_t pollDelay=STATE_POLL_INTERVAL_MS;
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   for (;;) {
     NetworkCommand command;
     bool forced = xQueueReceive(networkCommands, &command, pdMS_TO_TICKS(50)) == pdTRUE;
-    if (WiFi.status() != WL_CONNECTED) continue;
+    const bool connected=WiFi.status()==WL_CONNECTED;
     uint8_t otaCommand;
-    if(otaQueue&&xQueueReceive(otaQueue,&otaCommand,0)==pdTRUE){
+    if(connected&&otaQueue&&xQueueReceive(otaQueue,&otaCommand,0)==pdTRUE){
       if(otaCommand==1)otaCheck(rootca_crt_bundle_start);
       else if(otaCommand==2)otaInstall(rootca_crt_bundle_start);
       continue;
     }
+    if(displayMode==2){wasPokemon=true;pokemon.networkStep(connected?fetchPokemonSprite:nullptr,sha256Hex,fsMutex);continue;}
+    if(wasPokemon){wasPokemon=false;lastPoll=lastRadioPoll=idleSince=0;active=false;wasRadio=lastWasMusic=lastWasIdle=false;shownKey="";radioHash="";pollDelay=STATE_POLL_INTERVAL_MS;}
+    if(!connected)continue;
     uint32_t now = millis();
     if (!forced && now - lastPoll < pollDelay) {
       // Never start an optional high-resolution download ahead of a due
@@ -1568,6 +1592,11 @@ bool beginNextFallback(bool manual) {
 void processNetworkEvents() {
   NetworkEvent event;
   while (xQueueReceive(networkEvents, &event, 0) == pdTRUE) {
+    if(displayMode==2&&event.type!=NetworkEventType::Pack){
+      if(event.detail)free(event.detail);
+      if(event.data){if(event.type==NetworkEventType::State)delete reinterpret_cast<RemoteSnapshot*>(event.data);else free(event.data);}
+      continue;
+    }
     lastNetworkLatencyMs = event.latencyMs;
     if (event.type == NetworkEventType::State) {
       lastStateAt = millis();
@@ -1687,6 +1716,7 @@ void handleStatus() {
   j += "\"desat\":" + String(desatPct) + ",";
   j += "\"gamma\":" + String(gammaOn ? "true" : "false") + ",";
   j += "\"display_mode\":" + String(displayMode) + ",";
+  if(displayMode==2)j+="\"pokemon\":"+pokemon.status()+",";
 #define STATUS_AMBIENT(name,lo,hi) j += "\"am_" #name "\":" + String(ambientSettings.name) + ",";
   AMBIENT_FIELDS(STATUS_AMBIENT)
 #undef STATUS_AMBIENT
@@ -1747,7 +1777,8 @@ void handleStatus() {
 }
 
 void handleFrameBin() {
-  const uint16_t *art = ambientRendered&&ambientOutput&&displayMode==0&&!testCard
+  if(displayMode==2&&!pokemon.screen){server.send(503,"text/plain","Pokémon preview loading");return;}
+  const uint16_t *art = displayMode==2?pokemon.screen:ambientRendered&&ambientOutput&&displayMode==0&&!testCard
     ? ambientOutput : adjustedArtwork(transition.active?compositeFrame:frame);
   server.setContentLength(FRAME_BYTES);
   server.send(200, "application/octet-stream", "");
@@ -1755,6 +1786,7 @@ void handleFrameBin() {
 }
 
 void handleAmbient(){
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if(server.hasArg("reset"))ambientSettings=AmbientSettings{};
 #define SET_AMBIENT(name,lo,hi) \
   if(server.hasArg(#name))ambientSettings.name=constrain(server.arg(#name).toInt(),lo,hi); \
@@ -1779,6 +1811,7 @@ void handleOta(){
 }
 
 void handleImageAdjustments() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if (server.hasArg("reset")) imageSettings = ImageAdjustments{};
   if (server.hasArg("recommended")) imageSettings = cleanImagePreset();
 #define SET_IMAGE(name,lo,hi) \
@@ -1791,6 +1824,7 @@ void handleImageAdjustments() {
 }
 
 void handleFaceZoom() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if(server.hasArg("value")) {
     bool enabled=server.arg("value").toInt()!=0;
     if(enabled!=faceEnabled) {
@@ -1842,10 +1876,11 @@ void handleFaceZoom() {
 void applyBrightness(uint8_t value) {
   brightness = constrain(value, 1, 255);
   prefs.putUChar("bright", brightness);
-  if (display) display->setBrightness8(brightness);
+  if (display&&displayMode!=2) display->setBrightness8(brightness);
 }
 
 void handleBrightness() {
+  if(displayMode==2){server.send(409,"text/plain","Use Pokémon brightness in the Scene tab");return;}
   if (server.hasArg("value")) {
     applyBrightness(static_cast<uint8_t>(server.arg("value").toInt()));
   }
@@ -1865,12 +1900,14 @@ void handleColorOrder() {
 }
 
 void handleTestCard() {
+  if(displayMode==2){server.send(409,"text/plain","Switch to album mode first");return;}
   testCard = !testCard;
   drawFrame();
   server.send(200, "text/plain", testCard ? "test card ON" : "test card OFF");
 }
 
 void handleFade() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if (server.hasArg("value")) {
     fadeEnabled = server.arg("value").toInt() != 0;
     prefs.putUChar("fade", fadeEnabled ? 1 : 0);
@@ -1900,17 +1937,38 @@ void handleFade() {
                   "ms hold " + holdMs + "ms method " + fadeMethod);
 }
 
+static void enterPokemon(){
+  // A Pokémon scene owns the panel exclusively. Preserve the album's full
+  // cover and all album preferences, invalidate only in-flight zoom work.
+  if(faceBaseValid){memcpy(frame,faceBase,FRAME_BYTES);memcpy(compositeFrame,frame,FRAME_BYTES);hasFrame=true;}
+  else if(transition.active){memcpy(frame,transitionTo,FRAME_BYTES);memcpy(compositeFrame,frame,FRAME_BYTES);hasFrame=true;}
+  transition.active=false;zoomAnimating=false;ambientRendered=false;testCard=false;nextQueued=false;cachePending=false;
+  ++faceArtworkId;facePending=false;faceDetailWaiting=false;faceDetailRequested=false;faceScanAttempts=0;faceIndex=quadrantIndex=textIndex=-1;currentCrop={0,0,FACE_SOURCE_SIZE};
+  if(faceJobs){FaceJob job;while(xQueueReceive(faceJobs,&job,0)==pdTRUE)free(job.pixels);}if(detailJobs)xQueueReset(detailJobs);
+  pokemon.enter();if(display)display->setBrightness8(pokemon.config.brightness);
+}
 void handleMode() {
   if (server.hasArg("value")) {
-    uint8_t m = constrain(server.arg("value").toInt(), 0, 1);
+    if(otaInstalling()){server.send(409,"text/plain","Firmware update in progress");return;}
+    uint8_t m = constrain(server.arg("value").toInt(), 0, 2);
     if (m != displayMode) {
+      const bool wasPokemon=displayMode==2;
       displayMode = m;
       prefs.putUChar("mode", displayMode);
-      if (displayMode == 0 && hasFrame) drawFrame();
+      if(m==2)enterPokemon();
+      else {if(wasPokemon){pokemon.exit();if(display)display->setBrightness8(brightness);playbackActive=false;manualHoldUntil=millis()+3500;lastFallbackAt=0;faceChangedAt=millis();NetworkCommand command{NetworkCommandType::Refresh};xQueueOverwrite(networkCommands,&command);}
+        if (displayMode == 0 && hasFrame) drawFrame();}
     }
   }
-  server.send(200, "text/plain", displayMode == 1 ? "audio-reactive mode" : "album-art mode");
+  server.send(200, "text/plain", displayMode == 2 ? "Pokémon mode" : displayMode == 1 ? "audio-reactive mode" : "album-art mode");
 }
+
+void handlePokemonSettings(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}
+  pokemon.apply(server);if(display)display->setBrightness8(pokemon.config.brightness);server.send(200,"text/plain","Pokémon settings saved");}
+void handlePokemonAction(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}
+  const int cell=server.hasArg("cell")?server.arg("cell").toInt():-1,id=server.hasArg("id")?server.arg("id").toInt():0;
+  if(!pokemon.action(server.arg("action"),cell,id)){server.send(409,"text/plain","No compatible Pokémon or action available");return;}server.send(200,"text/plain","Pokémon updated");}
+void handlePokemonCatalog(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}pokemon.catalog(server);}
 
 void handleSave() {
   String newSsid = server.arg("ssid");
@@ -1951,12 +2009,14 @@ void handleSave() {
 }
 
 void handleRefresh() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   NetworkCommand command{NetworkCommandType::Refresh};
   xQueueOverwrite(networkCommands, &command);
   server.send(202, "application/json", "{\"accepted\":true,\"message\":\"Refresh queued\"}");
 }
 
 void handleNext() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if (playbackActive) {
     server.send(409, "application/json", "{\"error\":\"now_playing_active\",\"message\":\"Next fallback is available when playback is idle\"}");
     return;
@@ -2014,6 +2074,9 @@ void setupRoutes() {
   server.on("/ota", HTTP_POST, handleOta);
   server.on("/facezoom", HTTP_POST, handleFaceZoom);
   server.on("/mode", HTTP_POST, handleMode);
+  server.on("/pokemon/settings",HTTP_POST,handlePokemonSettings);
+  server.on("/pokemon/action",HTTP_POST,handlePokemonAction);
+  server.on("/pokemon/catalog",HTTP_GET,handlePokemonCatalog);
   server.on("/refresh", HTTP_POST, handleRefresh);
   server.on("/next", HTTP_POST, handleNext);
   server.on("/restart", HTTP_POST, handleRestart);
@@ -2072,6 +2135,7 @@ void setup() {
   Serial.println("\nAlbum Clock " FIRMWARE_VERSION);
 
   loadSettings();
+  pokemon.begin(prefs);
   Serial.printf("Reset reason: %d\n",(int)esp_reset_reason());
   if(faceInferenceMarker==FACE_BUSY_MAGIC && esp_reset_reason()!=ESP_RST_POWERON) {
     faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
@@ -2101,7 +2165,7 @@ void setup() {
       setFaceArtwork(frame,nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(localPack.lastIndex)+".rgb565",false,false,true);
     else setFaceArtwork(frame);
     memcpy(compositeFrame, frame, FRAME_BYTES);
-    if (fadeEnabled) {
+    if (fadeEnabled&&displayMode!=2) {
       memcpy(staging, frame, FRAME_BYTES);
       hasFrame = false;
       startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
@@ -2109,9 +2173,10 @@ void setup() {
       drawFrame();
     }
     Serial.println("Restored cached frame");
-  } else {
+  } else if(displayMode!=2) {
     showBootPattern();
   }
+  if(displayMode==2){enterPokemon();pokemon.service(draw565);}
 
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
   delay(40);
@@ -2142,6 +2207,7 @@ void loop() {
   if (apMode) {
     dnsServer.processNextRequest();
     server.handleClient();
+    if(displayMode==2){pokemon.networkStep(nullptr,sha256Hex,fsMutex);pokemon.service(draw565);delay(2);return;}
     serviceTransition();
     serviceFaces();
     serviceAmbient();
@@ -2151,6 +2217,7 @@ void loop() {
   processNetworkEvents();
   server.handleClient();
   if(otaInstalling()){delay(10);return;}
+  if(displayMode==2){pokemon.service(draw565);if(WiFi.status()!=WL_CONNECTED&&millis()-lastReconnectAttempt>=10000){lastReconnectAttempt=millis();WiFi.reconnect();}delay(2);return;}
   serviceTransition();
   serviceFaces();
   serviceAmbient();
