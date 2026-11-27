@@ -108,15 +108,15 @@ static WiimPlayback pollWiim() {
       deserializeJson(status, body, n)) return {};
   String state = status["status"] | "";
   if (state != "play") return {WiimKind::Idle, "", ""};
+  String statusTitle = decodeWiimHex(status["Title"] | "");
+  // Radio only needs the live player status, not a second metadata request.
+  if (wiimRadioTitle(statusTitle)) return {WiimKind::Radio, "kan88", statusTitle};
   if (!wiimRead("/httpapi.asp?command=getMetaInfo", body, sizeof(body), n) ||
       deserializeJson(metadata, body, n)) return {};
   JsonObjectConst meta = metadata["metaData"].as<JsonObjectConst>();
   String title = meta["title"] | "", artist = meta["artist"] | "", album = meta["album"] | "";
-  String statusTitle = decodeWiimHex(status["Title"] | "");
   String statusArtist = decodeWiimHex(status["Artist"] | "");
   String statusAlbum = decodeWiimHex(status["Album"] | "");
-  if (wiimRadioTitle(statusTitle))
-    return {WiimKind::Radio, "kan88", title};
   if (wiimRadioTitle(title) && !meaningful(statusTitle))
     return {WiimKind::Idle, "", ""};
   String mode = status["mode"] | "";

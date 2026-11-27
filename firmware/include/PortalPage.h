@@ -35,7 +35,7 @@ pre{background:var(--sub);padding:12px;border-radius:9px;font-size:11px;overflow
 <section class="panel" data-panel="zoom" hidden>
 <h3>Smart zoom</h3>
 <p class="caption">Explore the artwork with faces, typography and visual details.</p>
-<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (Apple Music only)</label>
+<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (music and Kan 88)</label>
 <label><input type="checkbox" id="textzoom" onchange="zoomSetting('text',this.checked?1:0)"> Enable text-region zoom</label>
 <label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces or text)</label>
 <label><input type="checkbox" id="saliency" onchange="zoomSetting('saliency',this.checked?1:0)"> Prioritize visually detailed quadrants</label>

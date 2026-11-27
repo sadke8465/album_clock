@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
+import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, type RadioTrack } from "./radio-match";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -527,6 +528,66 @@ export class NowPlayingCoordinator extends DurableObject<Env> {
   private lastPackCheckAt = 0;
   private lastPersistAt = 0;
 
+  // This instance is dedicated to Kan 88 (separate from the Last.fm state).
+  // Both displays see one strongly consistent cover and share a single lookup.
+  private radioLast: RadioCover | null = null;
+  private radioLoaded: Promise<void> | null = null;
+  private radioTrack: RadioTrack | null = null;
+  private radioCheckAt = 0;
+  private radioRefresh: Promise<void> | null = null;
+  private radioJobs = new Map<string, Promise<void>>();
+  private radioRetryAt = new Map<string, number>();
+
+  async getRadioState(): Promise<JsonRecord> {
+    if (!this.radioLoaded) this.radioLoaded = (async () => {
+      this.radioLast = await this.ctx.storage.get<RadioCover>("radio-last-v3") ??
+        await this.env.KV.get<RadioCover>("kan88:last-frame:v1", "json");
+    })().catch(()=>{ this.radioLoaded=null; });
+    await this.radioLoaded;
+    if (!this.radioRefresh && Date.now() - this.radioCheckAt >= 1200) {
+      this.radioCheckAt = Date.now();
+      this.radioRefresh = this.refreshRadio().finally(() => { this.radioRefresh = null; });
+      this.ctx.waitUntil(this.radioRefresh);
+    }
+    // Always return the last good cover immediately, even while the official
+    // feed or catalogue is slow. Never hold a client request open for search.
+    const track = this.radioTrack&&Date.now()<=this.radioTrack.end+15000?this.radioTrack:null;
+    return { ...this.radioLast,
+      cover_url:this.radioLast?.sha256?`/v1/radio/cover/${this.radioLast.sha256}`:undefined,
+      status: track && this.radioLast?.track_key === track.key ? "ready" : track ? "searching" : this.radioLast ? "holding" : "waiting",
+      current_title: track?.title ?? "", current_artists: track?.artists ?? [],
+      current_start: track?.start ?? null, current_end: track?.end ?? null,
+      checked_at: this.radioCheckAt, retry_after_ms: 1500 };
+  }
+
+  private async refreshRadio(): Promise<void> {
+    try {
+      const track = await getRadioTrack(this.env);
+      this.radioTrack = track;
+      if (!track || this.radioLast?.track_key === track.key || this.radioJobs.has(track.key) ||
+          (this.radioRetryAt.get(track.key) ?? 0) > Date.now()) return;
+      const job = this.resolveRadio(track).finally(() => { this.radioJobs.delete(track.key); });
+      this.radioJobs.set(track.key, job);
+      this.ctx.waitUntil(job);
+    } catch { /* Feed failures retain the last verified artwork. */ }
+  }
+
+  private async resolveRadio(track: RadioTrack): Promise<void> {
+    try {
+      const value = await resolveRadioCover(this.env, track);
+      if (!value) {
+        // No-match is deliberately short-lived; transient search failures
+        // should never lock out a song for its entire airtime.
+        this.radioRetryAt.set(track.key, Date.now()+12_000);
+        if (this.radioRetryAt.size > 64) this.radioRetryAt.delete(this.radioRetryAt.keys().next().value!);
+        return;
+      }
+      if (!canPublishRadio(track,this.radioTrack,Date.now())) return;
+      this.radioLast = value;
+      await this.ctx.storage.put("radio-last-v3", value);
+    } catch { this.radioRetryAt.set(track.key, Date.now()+4_000); }
+  }
+
   private async loadState(): Promise<CoordinatorState> {
     if (this.cachedState) return structuredClone(this.cachedState);
     const stored = await this.ctx.storage.get<CoordinatorState>("state");
@@ -794,118 +855,135 @@ async function serveCurrentManifest(env: Env): Promise<Response> {
   });
 }
 
-function radioNormalize(value: unknown): string {
-  return stringValue(value).normalize("NFKD").toLowerCase()
-    .replace(/\p{M}/gu, "").replace(/&/g, "and").replace(/[^\p{L}\p{N}]/gu, "");
+
+interface RadioCover { title: string; artists: string[]; album: string; sha256: string; track_key?: string; cover_url?: string; source?: string; score?: number; }
+interface RadioCandidate { image: string; album: string; score: number; source: string; date: string; compilation: boolean; single: boolean; }
+
+async function getRadioTrack(env: Env): Promise<RadioTrack | null> {
+  const response = await fetchWithTimeout("https://www.kan.org.il/api/arc-cloud/get-live-track-data?channelId=4",
+    { headers: { "User-Agent": ua(env), Accept: "application/json", "Cache-Control": "no-cache" } }, 2500);
+  if (!response.ok || response.status === 204) return null;
+  return parseRadioTrack(await response.json(),Date.now());
 }
 
-// Standalone radio endpoint; never consults a user's scrobbles.
+function radioImageType(bytes: ArrayBuffer): string {
+  const b=new Uint8Array(bytes);
+  if(b[0]===255&&b[1]===216)return "image/jpeg";
+  if(b[0]===137&&b[1]===80&&b[2]===78&&b[3]===71)return "image/png";
+  if(b[0]===82&&b[1]===73&&b[2]===70&&b[3]===70&&b[8]===87&&b[9]===69&&b[10]===66&&b[11]===80)return "image/webp";
+  throw new Error("Unsupported radio artwork format");
+}
+
+async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCover | null> {
+  const {title,artists}=track;
+  const key="kan88:track:v3:"+await hashBytes(new TextEncoder().encode(track.key));
+  const cached=await env.KV.get<RadioCover>(key,"json").catch(()=>null);
+  if(cached?.sha256&&cached.cover_url)return cached;
+  const add=(rowTitle:unknown,rowArtist:unknown,image:string,album:string,source:string,date="",isCompilation=false,isSingle=false):RadioCandidate[]=>{
+    const score=radioMatchScore(title,artists,rowTitle,rowArtist);
+    return score&&/^https:\/\//.test(image)?[{image,album,score,source,date,compilation:isCompilation||radioCompilation(album),single:isSingle||/\s-\s(?:single|ep)$/i.test(album)}]:[];
+  };
+  const apple=async(term:string,country:string):Promise<RadioCandidate[]>=>{
+    const data=asRecord(await fetchJson("https://itunes.apple.com/search?"+new URLSearchParams({term,country,entity:"song",limit:"65"}),env,2200));
+    return (Array.isArray(data?.results)?data.results:[]).flatMap(item=>{
+      const row=asRecord(item);
+      return add(row?.trackName,row?.artistName,stringValue(row?.artworkUrl100).replace(/100x100(?:bb)?/,"600x600bb"),
+        stringValue(row?.collectionName),"Apple Music "+country.toUpperCase(),stringValue(row?.releaseDate),
+        /various artists|אמנים שונים/i.test(stringValue(row?.collectionArtistName)));
+    });
+  };
+  const deezer=async():Promise<RadioCandidate[]>=>{
+    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+title,limit:"40"}),env,2200));
+    return (Array.isArray(data?.data)?data.data:[]).flatMap(item=>{
+      const row=asRecord(item),artist=asRecord(row?.artist),album=asRecord(row?.album);
+      return add(row?.title,artist?.name,stringValue(album?.cover_big)||stringValue(album?.cover_medium),stringValue(album?.title),"Deezer");
+    });
+  };
+  const musicbrainz=async():Promise<RadioCandidate[]>=>{
+    const quote=(v:string)=>v.replace(/[\\"]/g,"\\$&");
+    const q=new URLSearchParams({query:'recording:"'+quote(title)+'" AND artist:"'+quote(artists[0])+'"',fmt:"json",limit:"15"});
+    const data=asRecord(await fetchJson("https://musicbrainz.org/ws/2/recording/?"+q,env,2200));
+    return (Array.isArray(data?.recordings)?data.recordings:[]).flatMap(item=>{
+      const rec=asRecord(item), credits=Array.isArray(rec?.["artist-credit"])?rec["artist-credit"]:[];
+      const artist=credits.map(v=>{const c=asRecord(v);return stringValue(c?.name)+stringValue(c?.joinphrase);}).join("");
+      return (Array.isArray(rec?.releases)?rec.releases:[]).slice(0,15).flatMap(item=>{
+        const rel=asRecord(item), group=asRecord(rel?.["release-group"]), id=stringValue(rel?.id);
+        if(!/^[0-9a-f-]{36}$/.test(id))return [];
+        const types=Array.isArray(group?.["secondary-types"])?group["secondary-types"]:[];
+        return add(rec?.title,artist,"https://coverartarchive.org/release/"+id+"/front-500",stringValue(rel?.title),"MusicBrainz",
+          stringValue(rel?.date),types.includes("Compilation"),group?.["primary-type"]==="Single"||group?.["primary-type"]==="EP");
+      });
+    });
+  };
+  // Parallel catalogue requests: no repeated 2.2s waits per country/provider.
+  // The extra title-only search helps with localized artist aliases.
+  const term=artists[0]+" "+title;
+  const results=await Promise.allSettled([apple(term,"il"),apple(title,"il"),apple(term,"us"),apple(term,"gb"),deezer(),musicbrainz()]);
+  const candidates=results.flatMap(r=>r.status==="fulfilled"?r.value:[]);
+  // Prefer original studio albums, then earliest release, for comparably
+  // confident matches. An exact compilation still beats a weak wrong song.
+  rankRadioReleases(candidates);
+  const seen=new Set<string>(),albumCounts=new Map<string,number>();
+  const unique=candidates.filter(c=>{
+    const album=c.album.normalize("NFKC").trim().toLowerCase();
+    if(seen.has(c.image)||(album&&(albumCounts.get(album)??0)>=3))return false;
+    seen.add(c.image);albumCounts.set(album,(albumCounts.get(album)??0)+1);return true;
+  });
+  // Download top candidates in parallel, retaining ranking order if several
+  // work. Only decoded covers are eligible; broken CDN URLs are skipped.
+  for(let batch=0;batch<Math.min(8,unique.length);batch+=4){
+    const checked=await Promise.allSettled(unique.slice(batch,batch+4).map(async candidate=>({candidate,image:await fetchImage(candidate.image,env,Date.now()+2500)})));
+    for(const item of checked)if(item.status==="fulfilled"){
+    const {candidate,image}=item.value;
+    let contentType:string,frame:Uint8Array;
+    try{contentType=radioImageType(image);frame=processToRgb565(image);}catch{continue;}
+    const sha256=await hashBytes(frame);
+    await Promise.all([
+      env.FRAMES.put(`frames/${sha256}.rgb565`,frame,{httpMetadata:{contentType:"application/octet-stream"}}),
+      env.FRAMES.put(`radio/cover/${sha256}`,image,{httpMetadata:{contentType}})
+    ]);
+    const value:RadioCover={title,artists,album:candidate.album,sha256,track_key:track.key,cover_url:`/v1/radio/cover/${sha256}`,
+      source:candidate.source,score:candidate.score};
+    // A cache error must not prevent a verified cover from being displayed.
+    try{await env.KV.put(key,JSON.stringify(value),{expirationTtl:2592000});}catch{}
+    return value;
+    }
+  }
+  return null;
+}
+
 async function kan88State(env: Env): Promise<Response> {
-  const lastKey = "kan88:last-frame:v1";
-  const last = await env.KV.get(lastKey, "json") as JsonRecord | null;
-  const result = (value: JsonRecord | null) => jsonResponse(value ?? { status: "waiting" },
-    { headers: { "cache-control": "no-store" } });
-  try {
-    const response = await fetchWithTimeout("https://www.kan.org.il/api/arc-cloud/get-live-track-data?channelId=4",
-      { headers: { "User-Agent": ua(env), Accept: "application/json" } }, 3500);
-    if (!response.ok || response.status === 204) return result(last);
-    const live = asRecord(await response.json());
-    if (!live) return result(last);
-    const title = stringValue(live.title);
-    const artists = Array.isArray(live.artists) ? live.artists.map(stringValue).filter(Boolean) : [];
-    const start = Date.parse(stringValue(live.startTime)), end = Date.parse(stringValue(live.endTime));
-    const now = Date.now();
-    if (!title || !artists.length || !Number.isFinite(start) || !Number.isFinite(end) ||
-        now > end + 15000 || now < start - 60000) return result(last);
-    const key = "kan88:track:v2:" + await hashBytes(new TextEncoder().encode(
-      [radioNormalize(title), ...artists.map(radioNormalize)].join("|")));
-    const cached = await env.KV.get(key, "json") as JsonRecord | null;
-    if (cached) {
-      if (cached.sha256) {
-        if (last?.sha256 !== cached.sha256) await env.KV.put(lastKey, JSON.stringify(cached));
-        return result(cached);
-      }
-      return result(last);
-    }
-    const bareTitle = (value: unknown) => radioNormalize(stringValue(value)
-      .replace(/\s*[\[(](?:\d{4}\s*)?(?:remaster(?:ed)?|original mix|mono|stereo)(?:\s+\d{4})?[\])]/gi, ""));
-    const bareArtist = (value: unknown) => radioNormalize(stringValue(value)
-      .replace(/\s+(?:and|&)\s+(?:his|her|their|the)\s+(?:orchestra|band|ensemble|quartet|trio)$/i, ""));
-    const matches = (track: unknown, artist: unknown) =>
-      (radioNormalize(track) === radioNormalize(title) || bareTitle(track) === bareTitle(title)) &&
-      artists.some(a => radioNormalize(a) === radioNormalize(artist) ||
-        (radioNormalize(track) === radioNormalize(title) && bareArtist(a).length >= 5 && bareArtist(a) === bareArtist(artist)));
-    const candidates: { image: string; album: string }[] = [];
-    const term = artists[0] + " " + title;
-    for (const country of ["il", "us", "gb"]) {
-      try {
-        const data = asRecord(await fetchJson("https://itunes.apple.com/search?" +
-          new URLSearchParams({ term, country, entity: "song", limit: "35" }), env, 2200));
-        for (const item of Array.isArray(data?.results) ? data.results : []) {
-          const row = asRecord(item);
-          if (row && matches(row.trackName, row.artistName) && stringValue(row.artworkUrl100))
-            candidates.push({ image: stringValue(row.artworkUrl100).replace("100x100bb", "600x600bb"),
-              album: stringValue(row.collectionName) });
-        }
-        if (candidates.length) break;
-      } catch { /* Try another catalogue. */ }
-    }
-    if (!candidates.length) {
-      try {
-        const data = asRecord(await fetchJson("https://api.deezer.com/search?" +
-          new URLSearchParams({ q: term, limit: "25" }), env, 2200));
-        for (const item of Array.isArray(data?.data) ? data.data : []) {
-          const row = asRecord(item), artist = asRecord(row?.artist), album = asRecord(row?.album);
-          if (row && matches(row.title, artist?.name) && stringValue(album?.cover_medium))
-            candidates.push({ image: stringValue(album?.cover_big)||stringValue(album?.cover_medium), album: stringValue(album?.title) });
-        }
-      } catch { /* Retain last verified cover. */ }
-    }
-    if (!candidates.length) {
-      try {
-        const quote = (value: string) => value.replace(/[\\"]/g, "\\$&");
-        const q = new URLSearchParams({ query: 'recording:"' + quote(title) + '" AND artist:"' + quote(artists[0]) + '"',
-          fmt: "json", limit: "8" });
-        const data = asRecord(await fetchJson("https://musicbrainz.org/ws/2/recording/?" + q, env, 2200));
-        for (const item of Array.isArray(data?.recordings) ? data.recordings : []) {
-          const rec = asRecord(item);
-          const credits = Array.isArray(rec?.["artist-credit"]) ? rec["artist-credit"] : [];
-          const artist = credits.map(value => {
-            const credit = asRecord(value);
-            return stringValue(credit?.name) + stringValue(credit?.joinphrase);
-          }).join("");
-          if (!matches(rec?.title, artist)) continue;
-          for (const item of (Array.isArray(rec?.releases) ? rec.releases : []).slice(0, 4)) {
-            const release = asRecord(item), id = stringValue(release?.id);
-            if (/^[0-9a-f-]{36}$/.test(id)) candidates.push({
-              image: "https://coverartarchive.org/release/" + id + "/front-500",
-              album: stringValue(release?.title),
-            });
-          }
-        }
-      } catch { /* Retain last verified cover. */ }
-    }
-    const compilation = (s: string) => /best of|greatest hits|collection|anthology|compilation/i.test(s);
-    candidates.sort((a,b) => Number(compilation(a.album)) - Number(compilation(b.album)));
-    for (const candidate of candidates.slice(0,3)) {
-      try {
-        const image = await fetchImage(candidate.image, env, Date.now() + 2500);
-        const frame = processToRgb565(image);
-        const sha256 = await hashBytes(frame);
-        await env.FRAMES.put(`frames/${sha256}.rgb565`, frame, {
-          httpMetadata: { contentType: "application/octet-stream" },
-        });
-        // Keep a separate 512px crop source; the existing 64px API stays intact.
-        try{await storeDetail(env,`detail/radio/${sha256}.rgb565`,processToRgb565(image,DETAIL_SIZE));}catch{}
-        const value = { status: "ready", title, artists, sha256, album: candidate.album };
-        await env.KV.put(key, JSON.stringify(value), { expirationTtl: 2592000 });
-        await env.KV.put(lastKey, JSON.stringify(value));
-        return result(value);
-      } catch { /* Try another matching cover. */ }
-    }
-    await env.KV.put(key, JSON.stringify({ status: "no-match" }), { expirationTtl: 120 });
-  } catch { /* A failed feed must not discard the last radio cover. */ }
-  return result(last);
+  const state=await env.NOW_PLAYING.getByName("kan88-live-v3",{locationHint:"me"}).getRadioState();
+  return jsonResponse(state,{headers:{"cache-control":"no-store"}});
+}
+
+async function radioDetail(env:Env,hash:string):Promise<Response>{
+  const key=`detail/radio/${hash}.rgb565`;
+  if(await env.FRAMES.head(key))return serveDetail(env,key);
+  const cover=await env.FRAMES.get(`radio/cover/${hash}`);
+  if(!cover)return jsonResponse({error:"detail_unavailable"},{status:404});
+  try{await storeDetail(env,key,processToRgb565(await cover.arrayBuffer(),DETAIL_SIZE));return serveDetail(env,key);}
+  catch{return jsonResponse({error:"detail_unavailable"},{status:404});}
+}
+
+async function serveRadioCover(env:Env,hash:string,headOnly:boolean):Promise<Response>{
+  const object=await env.FRAMES.get(`radio/cover/${hash}`);
+  if(object)return new Response(headOnly?null:object.body,{headers:{
+    "content-type":object.httpMetadata?.contentType??"image/jpeg","content-length":String(object.size),
+    "cache-control":"public,max-age=31536000,immutable","x-content-type-options":"nosniff",...corsHeaders()}});
+  // Previous firmware stored only RGB565. Recover its high-resolution crop
+  // for the CRT so the two displays match even before the first new lookup.
+  const detail=await env.FRAMES.get(`detail/radio/${hash}.rgb565`);
+  const legacy=detail?.size===DETAIL_BYTES?detail:await env.FRAMES.get(`frames/${hash}.rgb565`);
+  if(!legacy||![DETAIL_BYTES,FRAME_BYTES].includes(legacy.size))return jsonResponse({error:"cover_not_found"},{status:404});
+  const side=legacy.size===DETAIL_BYTES?DETAIL_SIZE:64,raw=await legacy.bytes(),rgba=new Uint8Array(side*side*4);
+  for(let i=0;i<side*side;i++){
+    const v=raw[i*2]|raw[i*2+1]<<8,r=v>>11,g=(v>>5)&63,b=v&31;
+    rgba[i*4]=(r<<3)|(r>>2);rgba[i*4+1]=(g<<2)|(g>>4);rgba[i*4+2]=(b<<3)|(b>>2);rgba[i*4+3]=255;
+  }
+  const image=new PhotonImage(rgba,side,side);
+  try{return new Response(headOnly?null:image.get_bytes(),{headers:{"content-type":"image/png","cache-control":"public,max-age=60",...corsHeaders()}});}
+  finally{image.free();}
 }
 
 async function legacyFrame(request: Request, env: Env): Promise<Response> {
@@ -984,8 +1062,10 @@ export default {
         if(!object)return jsonResponse({error:"firmware_unavailable"},{status:404});
         return new Response(object.body,{headers:{"content-type":"application/octet-stream","content-length":String(object.size),"cache-control":"public,max-age=31536000,immutable"}});
       }
-      const radioDetail=url.pathname.match(/^\/v1\/detail\/radio\/([a-f0-9]{64})\.rgb565$/);
-      if(radioDetail)return serveDetail(env,`detail/radio/${radioDetail[1]}.rgb565`);
+      const radioCover=url.pathname.match(/^\/v1\/radio\/cover\/([a-f0-9]{64})$/);
+      if(radioCover)return serveRadioCover(env,radioCover[1],request.method==="HEAD");
+      const radioDetailMatch=url.pathname.match(/^\/v1\/detail\/radio\/([a-f0-9]{64})\.rgb565$/);
+      if(radioDetailMatch)return radioDetail(env,radioDetailMatch[1]);
       const randomDetail=url.pathname.match(/^\/v1\/detail\/fallback\/([a-f0-9]{64})\/(\d{1,4})\.rgb565$/);
       if(randomDetail)return fallbackDetail(env,randomDetail[1],Number(randomDetail[2]));
       const frameMatch = url.pathname.match(

@@ -54,11 +54,13 @@ static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, faceP
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
 static int faceWidth=64;
-static bool faceRecovery=false, faceReady=false,faceAppleMusic=false;
+static bool faceRecovery=false, faceReady=false,faceLiveMusic=false,faceRadioArtwork=false;
 static uint64_t faceFingerprint=0,faceLastEmpty=0;
 static uint32_t facePendingAt=0;
 static String faceDetailPath;
 static bool faceDetailRequested=false,faceDetailWaiting=false;
+static uint8_t faceDetailAttempts=0;
+static uint32_t faceDetailRetryAt=0;
 RTC_NOINIT_ATTR static uint32_t faceInferenceMarker;
 static constexpr uint32_t FACE_BUSY_MAGIC=0xface3410;
 static uint32_t faceArtworkId=0, faceChangedAt=0;
@@ -172,6 +174,8 @@ struct TransitionState {
   uint32_t generation = 0;
   uint32_t startedAt = 0;
   uint32_t lastDrawAt = 0;
+  uint16_t durationMs = DEFAULT_TRANSITION_MS;
+  uint16_t holdMs = DEFAULT_FADE_HOLD_MS;
 };
 
 static RemoteSnapshot remoteState;
@@ -446,7 +450,7 @@ static void serviceAmbient() {
 
 bool beginNextFallback(bool manual);
 
-void startTransition(const uint16_t *target, uint32_t generation) {
+void startTransition(const uint16_t *target, uint32_t generation,bool radio=false) {
   if (!display || !target) return;
   if (transition.active && memcmp(transitionTo, target, FRAME_BYTES) == 0) return;
   if (!transition.active && hasFrame && memcmp(frame, target, FRAME_BYTES) == 0) return;
@@ -461,6 +465,10 @@ void startTransition(const uint16_t *target, uint32_t generation) {
   transition.generation = generation;
   transition.startedAt = millis();
   transition.lastDrawAt = 0;
+  // A live song change should not spend several seconds on the old cover.
+  // Keep the selected visual method, but cap the duration for radio only.
+  transition.durationMs=radio?min(transitionMs,(uint16_t)1200):transitionMs;
+  transition.holdMs=radio?min(holdMs,(uint16_t)100):holdMs;
   computeField(transitionFrom, fieldOld, patOut);
   computeField(transitionTo, fieldNew, patIn);
 
@@ -476,7 +484,7 @@ void startTransition(const uint16_t *target, uint32_t generation) {
 
 // Executed by the network task between requests. No TLS session is open, and
 // the model destructor runs before networking resumes.
-static void runFaceDetection(FaceJob job) {
+static void runFaceDetection(FaceJob job, bool radio) {
     FaceResult result{};result.id=job.id;result.fingerprint=job.fingerprint;
     size_t before=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     size_t largest=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
@@ -493,8 +501,8 @@ static void runFaceDetection(FaceJob job) {
       faceInferenceMarker=FACE_BUSY_MAGIC;
       {
         HumanFaceDetectMSR01 detector(0.35F-job.sensitivity*0.0025F,0.5F,FACE_MAX,0.75F);
-        for(int pass=0;pass<6&&result.count<FACE_MAX;pass++){
-          if(pass&&(millis()-started>6000||!faceEnabled||job.id!=faceArtworkId||
+        for(int pass=0;pass<(radio?3:6)&&result.count<FACE_MAX;pass++){
+          if(pass&&(millis()-started>(radio?2200UL:6000UL)||!faceEnabled||job.id!=faceArtworkId||
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<30000))break;
           FaceCrop tile=faceScanTile(pass);uint32_t total=0;
           for(int y=0;y<FACE_DETECT_SIZE;y++){
@@ -531,7 +539,7 @@ static void runFaceDetection(FaceJob job) {
     vTaskDelay(1);
 }
 static void requestFaceDetection() {
-  if(!faceReady||!faceEnabled||!faceAppleMusic||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||faceTriedId==faceArtworkId)return;
+  if(!faceReady||!faceEnabled||!faceLiveMusic||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||faceTriedId==faceArtworkId)return;
   faceTriedId=faceArtworkId;
   uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
   for(const auto &cached:faceCache)if(cached.fingerprint==fingerprint&&cached.count>0&&cached.count<=FACE_MAX){
@@ -547,29 +555,31 @@ static void requestFaceDetection() {
   FaceJob job{faceArtworkId,copy,faceWidth,fingerprint,faceSensitivity};
   if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();}else free(copy);
 }
-static void serviceFaceJob(bool musicAllowed) {
+static void serviceFaceJob(bool musicAllowed,bool radio=false) {
   FaceJob job;
   if(!faceJobs||xQueueReceive(faceJobs,&job,0)!=pdTRUE)return;
-  if(musicAllowed&&faceEnabled&&faceAppleMusic&&job.id==faceArtworkId)runFaceDetection(job);
+  if(musicAllowed&&faceEnabled&&faceLiveMusic&&job.id==faceArtworkId)runFaceDetection(job,radio);
   else {free(job.pixels);FaceResult result{};result.id=job.id;xQueueOverwrite(faceResults,&result);}
 }
 static void requestArtworkDetail(){
-  if(!detailJobs||faceDetailed||faceDetailRequested||!faceDetailPath.length()||(!quadrantEnabled&&!textEnabled))return;
+  if(!detailJobs||faceDetailed||faceDetailRequested||faceDetailAttempts>=3||
+     (faceDetailRetryAt&&(int32_t)(millis()-faceDetailRetryAt)<0)||!faceDetailPath.length()||
+     (!quadrantEnabled&&!textEnabled&&!(faceEnabled&&faceLiveMusic)))return;
   DetailJob job{};job.id=faceArtworkId;strlcpy(job.path,faceDetailPath.c_str(),sizeof(job.path));
-  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;
+  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;++faceDetailAttempts;
 }
-static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool appleMusic=false) {
+static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool liveMusic=false,bool radio=false) {
   ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
   smartRegions=SmartRegions{};regionsReady=false;
   zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
   memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
-  faceAppleMusic=appleMusic;
+  faceLiveMusic=liveMusic;faceRadioArtwork=radio;
   faceFingerprint=14695981039346656037ULL;
   for(int i=0;i<4096;i++){faceFingerprint^=source[i];faceFingerprint*=1099511628211ULL;}
   if(faceSource)free(faceSource);
   faceSource=detail;faceDetailed=detail!=nullptr;
   faceWidth=detail?FACE_DETAIL_SIZE:64;
-  faceDetailPath=path;faceDetailRequested=false;faceDetailWaiting=false;
+  faceDetailPath=path;faceDetailRequested=false;faceDetailWaiting=false;faceDetailAttempts=0;faceDetailRetryAt=0;
   if(!faceSource) {
     faceSource=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(faceSource)memcpy(faceSource,source,FRAME_BYTES);
@@ -600,7 +610,7 @@ static void returnFullCover() {
   if(faceBaseValid&&faceSource)startCropZoom({0,0,FACE_SOURCE_SIZE});
 }
 static bool advanceFace() {
-  if(!faceEnabled||!faceAppleMusic||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
+  if(!faceEnabled||!faceLiveMusic||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
   quadrantIndex=-1;textIndex=-1;
   ++faceIndex;
   if(faceIndex>=faceCount)faceIndex=-1;
@@ -655,7 +665,7 @@ static void serviceFaces() {
       }else if(result.ran)faceLastEmpty=result.fingerprint;
     }
   }
-  if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0){analyzeCurrentRegions();requestFaceDetection();}
+  if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0){requestArtworkDetail();analyzeCurrentRegions();requestFaceDetection();}
   serviceCropZoom();
   if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0&&textIndex<0)?zoomDelay*1000UL:zoomHold*1000UL)) {
     if(quadrantEnabled&&quadrantIndex>=0)advanceQuadrant();
@@ -671,7 +681,7 @@ void serviceTransition() {
   uint32_t now = millis();
   if (transition.lastDrawAt && now - transition.lastDrawAt < TRANSITION_FRAME_MS) return;
   transition.lastDrawAt = now;
-  float total = max(1.0f, (float)(transition.haveOld ? transitionMs : transitionMs / 2));
+  float total = max(1.0f, (float)(transition.haveOld ? transition.durationMs : transition.durationMs / 2));
   float elapsed = (float)(now - transition.startedAt);
   float progress = min(1.0f, elapsed / total);
   float spread = spreadPct / 100.0f, soft = softPct / 100.0f;
@@ -696,9 +706,9 @@ void serviceTransition() {
         float local = framp(progress, fieldOld[i] / 255.0f, spread, soft);
         value = blended565(transitionFrom[i], transitionTo[i], 1.0f - easef(easeOut, local), easef(easeIn, local));
       } else {
-        float nonHold = max(1.0f, total - (float)holdMs);
+        float nonHold = max(1.0f, total - (float)transition.holdMs);
         float outEnd = max(1.0f, (balancePct / 100.0f) * nonHold);
-        float inStart = outEnd + holdMs;
+        float inStart = outEnd + transition.holdMs;
         float inDuration = max(1.0f, total - inStart);
         if (elapsed < outEnd) value = scaled565(transitionFrom[i], 1.0f - easef(easeOut, framp(elapsed / outEnd, fieldOld[i] / 255.0f, spread, soft)));
         else if (elapsed < inStart) value = 0;
@@ -1199,18 +1209,18 @@ void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, 
   }
 }
 
-static uint16_t *fetchArtworkDetail(const String &path) {
+static uint16_t *fetchArtworkDetail(const String &path,bool radio=false) {
   constexpr size_t size=FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2;
   HTTPClient http;WiFiClient plain;WiFiClientSecure secure;
   if(!beginHttp(http,plain,secure,serviceOrigin+path))return nullptr;
   const char *headers[]={"x-detail-sha256"};http.collectHeaders(headers,1);
-  http.setTimeout(5000);http.setConnectTimeout(3000);
+  http.setTimeout(radio?3000:5000);http.setConnectTimeout(radio?1800:3000);
   int code=http.GET();String hash=http.header("x-detail-sha256");
   if(code!=200||http.getSize()!=(int)size||hash.length()!=64){http.end();return nullptr;}
   uint8_t *data=(uint8_t *)heap_caps_malloc(size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!data){http.end();return nullptr;}
   auto stream=http.getStreamPtr();size_t n=0;uint32_t start=millis();
-  while(n<size&&millis()-start<8000){
+  while(n<size&&millis()-start<(radio?3000UL:8000UL)){
     int available=stream->available();
     if(available>0){int got=stream->read(data+n,min((size_t)available,size-n));if(got>0)n+=got;}
     else if(!http.connected())break;
@@ -1310,10 +1320,10 @@ void legacyNetworkTask(void *) {
   }
 }
 
-static bool readServiceJson(const String &path, String &json) {
+static bool readServiceJson(const String &path, String &json,uint16_t timeout=12000) {
   HTTPClient http; WiFiClient plain; WiFiClientSecure secure;
   if (!beginHttp(http, plain, secure, serviceOrigin + path)) return false;
-  http.setTimeout(12000);
+  http.setTimeout(timeout);http.setConnectTimeout(min(timeout,(uint16_t)3000));
   bool ok = http.GET() == HTTP_CODE_OK;
   if (ok) json = http.getString();
   http.end();
@@ -1339,20 +1349,21 @@ void networkTask(void *) {
       continue;
     }
     uint32_t now = millis();
-    DetailJob detailJob;
-    if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE){
-      uint16_t *detail=fetchArtworkDetail(detailJob.path);
-      pushNetworkEvent(NetworkEventType::Detail,detailJob.id,false,0,nullptr,detail?"Artwork detail ready":"Artwork detail unavailable",detail);
-    }
     if (!forced && now - lastPoll < pollDelay) {
-      serviceFaceJob(lastWasMusic);
+      // Never start an optional high-resolution download ahead of a due
+      // radio/track update. Stale detail requests can be discarded outright.
+      DetailJob detailJob;
+      if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE&&detailJob.id==faceArtworkId){
+        uint16_t *detail=fetchArtworkDetail(detailJob.path,wasRadio);
+        pushNetworkEvent(NetworkEventType::Detail,detailJob.id,false,0,nullptr,detail?"Artwork detail ready":"Artwork detail unavailable",detail);
+      } else serviceFaceJob(lastWasMusic,wasRadio);
       continue;
     }
     lastPoll = now;
     networkBusy = true;
     WiimPlayback current = pollWiim();
-    lastWasMusic=current.kind==WiimKind::Music;
-    pollDelay=current.kind==WiimKind::Unknown?min(15000UL,pollDelay*2UL):STATE_POLL_INTERVAL_MS;
+    lastWasMusic=current.kind==WiimKind::Music||current.kind==WiimKind::Radio;
+    pollDelay=current.kind==WiimKind::Unknown?min(15000UL,pollDelay*2UL):current.kind==WiimKind::Radio?RADIO_POLL_INTERVAL_MS:STATE_POLL_INTERVAL_MS;
     bool recognized = current.kind == WiimKind::Music || current.kind == WiimKind::Radio;
     if (recognized) { active = true; idleSince = 0; }
     else if (current.kind == WiimKind::Idle) {
@@ -1380,10 +1391,10 @@ void networkTask(void *) {
         } else {free(bytes);free(detail);}
       } else {free(bytes);free(detail);}
     }
-    if (current.kind == WiimKind::Radio && (!wasRadio || now-lastRadioPoll >= 10000)) {
+    if (current.kind == WiimKind::Radio && (!wasRadio || forced || now-lastRadioPoll >= RADIO_POLL_INTERVAL_MS)) {
       lastRadioPoll = now;
       String json;
-      if (readServiceJson("/v1/radio/kan88/state", json)) {
+      if (readServiceJson("/v1/radio/kan88/state", json,3500)) {
         String hash = jsonStringAt(json, "sha256");
         if (hash.length() == 64 && (hash != radioHash || shownKey != "kan88")) {
           uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
@@ -1422,7 +1433,8 @@ void networkTask(void *) {
       }
     }
     networkBusy = false;
-    serviceFaceJob(lastWasMusic);
+    // Radio inference is deferred to the next spare polling window.
+    if(wasRadio)lastPoll=millis();else serviceFaceJob(lastWasMusic);
   }
 }
 
@@ -1557,10 +1569,11 @@ void processNetworkEvents() {
         lastRemoteGeneration = event.generation;
         lastFrameAt = millis();
         lastByteCount = FRAME_BYTES;
+        const bool radio=strcmp(event.message,"KAN 88 artwork")==0;
         setFaceArtwork(reinterpret_cast<const uint16_t *>(event.data),event.detail,event.detailPath,
-          strcmp(event.message,"WiiM artwork")==0);
+          radio||strcmp(event.message,"WiiM artwork")==0,radio);
         event.detail=nullptr;
-        startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration);
+        startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration,radio);
         lastResult = event.message;
       }
       if (event.data) free(event.data);
@@ -1573,7 +1586,7 @@ void processNetworkEvents() {
           faceSource=event.detail;event.detail=nullptr;faceDetailed=true;faceWidth=FACE_DETAIL_SIZE;
           faceCount=0;faceIndex=-1;facePending=false;
           regionsReady=false;smartRegions=SmartRegions{};
-        }
+        } else if(faceDetailAttempts<3){faceDetailRequested=false;faceDetailRetryAt=millis()+2000;}
         requestFaceDetection();
       }
       if(event.detail)free(event.detail);
@@ -1658,7 +1671,9 @@ void handleStatus() {
 #undef STATUS_AMBIENT
   j += "\"ambient_rendered\":" + String(ambientRendered&&displayMode==0&&!testCard?"true":"false") + ",";
   j += "\"face_enabled\":" + String(faceEnabled?"true":"false") + ",";
-  j += "\"face_apple_music\":" + String(faceAppleMusic?"true":"false") + ",";
+  j += "\"face_apple_music\":" + String(faceLiveMusic?"true":"false") + ",";
+  j += "\"face_live_music\":" + String(faceLiveMusic?"true":"false") + ",";
+  j += "\"face_radio\":" + String(faceRadioArtwork?"true":"false") + ",";
   j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
   j += "\"face_count\":" + String(faceCount) + ",";
   j += "\"face_index\":" + String(faceIndex) + ",";
