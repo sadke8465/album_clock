@@ -53,6 +53,35 @@ int main(){
     FaceCrop beginning=interpolateCrop({0,0,256},q2,0), end=interpolateCrop({0,0,256},q2,1);
     assert(beginning.side==256 && end.x==64 && end.y==64 && end.side==192);
     for(int i=0;i<=100;i++){FaceCrop c=interpolateCrop({0,0,256},q2,i/100.f);assert(c.x>=0&&c.y>=0&&c.x+c.side<=256&&c.y+c.side<=256);}
+    MotionCrop a{0,0,256}, b=motionCrop(q2);
+    auto fractional=interpolateMotion(a,b,.1f,100);
+    assert(fractional.x>0 && fractional.x<1 && fractional.side<256);
+    auto linear=interpolateMotion(a,b,.25f,0);
+    assert(linear.x==16 && linear.side==240);
+    auto endMotion=interpolateMotion(a,b,1.1f,100);
+    assert(endMotion.x==64 && endMotion.side==192);
+    assert(motionSample(tiny,2,32768,32768)==middle);
+    for(int i=0;i<=100;i++){
+      auto crop=interpolateMotion(a,b,i/100.f,100);
+      assert(crop.x>=0&&crop.y>=0&&crop.x+crop.side<=256.001f);
+      faceResizeMotion(original,256,output,64,crop);
+      for(auto v:output)assert(v==0x07e0);
+    }
+    uint16_t base[64*64];
+    for(auto &v:base)v=0xf800;
+    faceResizeMotion(original,256,output,64,a,base);
+    for(auto v:output)assert(v==0xf800);
+    faceResizeMotion(original,256,output,64,b,base);
+    for(auto v:output)assert(v==0x07e0);
+    // Fractional moves must actually change pixel values before a whole
+    // normalized source pixel has moved.
+    uint16_t edge[64*64], before[64*64];
+    for(int y=0;y<64;y++)for(int x=0;x<64;x++)edge[y*64+x]=x<32?0:0xffff;
+    faceResizeMotion(edge,64,before,64,{64,64,128});
+    faceResizeMotion(edge,64,output,64,{64.75f,64,128});
+    bool changed=false;
+    for(int i=0;i<4096;i++)if(before[i]!=output[i])changed=true;
+    assert(changed);
 }
 """
         with tempfile.TemporaryDirectory() as d:

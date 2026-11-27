@@ -6,6 +6,14 @@
 constexpr int FACE_SOURCE_SIZE=256, FACE_DETAIL_SIZE=512, FACE_DETECT_SIZE=192, FACE_MAX=5;
 struct FaceRect { int x0,y0,x1,y1; };
 struct FaceCrop { int x,y,side; };
+struct MotionCrop { float x,y,side; };
+static inline MotionCrop motionCrop(FaceCrop c){return {(float)c.x,(float)c.y,(float)c.side};}
+static inline MotionCrop interpolateMotion(MotionCrop a,MotionCrop b,float t,int smoothness){
+  if(t<=0)return a;if(t>=1)return b;
+  float s=t*t*t*(10.f+t*(-15.f+6.f*t));
+  t+=(s-t)*smoothness*.01f;
+  return {a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.side+(b.side-a.side)*t};
+}
 constexpr int TEXT_MAX=4;
 static inline int zoomClamp(int v,int lo,int hi){return v<lo?lo:(v>hi?hi:v);}
 static inline FaceCrop centeredCrop(int x,int y,int side){
@@ -96,5 +104,48 @@ static inline void faceResizeClean(const uint16_t *src,int width,uint16_t *dst,i
     int g=(((a>>5)&63)+((b>>5)&63)+((c>>5)&63)+((e>>5)&63)+2)/4;
     int bl=((a&31)+(b&31)+(c&31)+(e&31)+2)/4;
     dst[y*size+x]=(r<<11)|(g<<5)|bl;
+  }
+}
+// Fixed-point bilinear interpolation: keep fractional coordinates throughout
+// motion, without per-pixel floating point rounding or temporary allocations.
+static inline uint16_t motionSample(const uint16_t *src,int width,int32_t x,int32_t y){
+  int32_t edge=(width-1)<<16;
+  x=zoomClamp(x,0,edge);y=zoomClamp(y,0,edge);
+  int ix=x>>16,iy=y>>16,nx=ix<width-1?ix+1:ix,ny=iy<width-1?iy+1:iy;
+  unsigned fx=(x>>8)&255,fy=(y>>8)&255;
+  unsigned w[4]={(256-fx)*(256-fy),fx*(256-fy),(256-fx)*fy,fx*fy};
+  uint16_t p[4]={src[iy*width+ix],src[iy*width+nx],src[ny*width+ix],src[ny*width+nx]};
+  unsigned r=32768,g=32768,b=32768;
+  for(int i=0;i<4;i++){r+=(p[i]>>11)*w[i];g+=((p[i]>>5)&63)*w[i];b+=(p[i]&31)*w[i];}
+  return ((r>>16)<<11)|((g>>16)<<5)|(b>>16);
+}
+static inline uint16_t motionBlend(uint16_t a,uint16_t b,unsigned t){
+  unsigned u=256-t;
+  return ((((a>>11)*u+(b>>11)*t+128)>>8)<<11)|
+    (((((a>>5)&63)*u+((b>>5)&63)*t+128)>>8)<<5)|
+    (((a&31)*u+(b&31)*t+128)>>8);
+}
+static inline void faceResizeMotion(const uint16_t *src,int width,uint16_t *dst,int size,MotionCrop crop,const uint16_t *base=nullptr){
+  float scale=width/(float)FACE_SOURCE_SIZE;
+  int32_t step=lroundf(crop.side*scale/size*65536.f);
+  int32_t x0=lroundf(crop.x*scale*65536.f)+step/2-32768;
+  int32_t y0=lroundf(crop.y*scale*65536.f)+step/2-32768;
+  // Continuous filter footprint, including when crossing from downsampling
+  // to magnification. No filter switch or sharpness jump at the endpoint.
+  int32_t d=step>65536?(step-65536)/4:0;
+  unsigned mix=base?zoomClamp(lroundf((256.f-crop.side)*32.f),0,256):256;
+  for(int y=0;y<size;y++)for(int x=0;x<size;x++){
+    int32_t sx=x0+x*step,sy=y0+y*step;
+    uint16_t p;
+    if(!mix){dst[y*size+x]=base[y*size+x];continue;}
+    if(!d)p=motionSample(src,width,sx,sy);
+    else{
+      uint16_t a=motionSample(src,width,sx-d,sy-d),b=motionSample(src,width,sx+d,sy-d),
+        c=motionSample(src,width,sx-d,sy+d),e=motionSample(src,width,sx+d,sy+d);
+      p=((( (a>>11)+(b>>11)+(c>>11)+(e>>11)+2)/4)<<11)|
+        (((((a>>5)&63)+((b>>5)&63)+((c>>5)&63)+((e>>5)&63)+2)/4)<<5)|
+        (((a&31)+(b&31)+(c&31)+(e&31)+2)/4);
+    }
+    dst[y*size+x]=mix==256?p:motionBlend(base[y*size+x],p,mix);
   }
 }

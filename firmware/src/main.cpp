@@ -70,7 +70,10 @@ static uint8_t faceSensitivity=60,zoomDepth=100,zoomHold=18,zoomDelay=30;
 static bool zoomAnimating=false;
 static uint32_t zoomStarted=0,zoomLastDraw=0;
 static uint16_t zoomDuration=3000;
-static FaceCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
+static MotionCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
+static uint8_t zoomFps=30,zoomSmoothness=100,activeZoomSmoothness=100;
+static uint16_t activeZoomDuration=3000;
+static uint32_t zoomRenderMs=0;
 static FaceCrop faceCrops[FACE_MAX];
 struct FaceJob { uint32_t id; uint16_t *pixels; int width; uint64_t fingerprint; uint8_t sensitivity; };
 struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; uint64_t fingerprint; bool ran; };
@@ -572,25 +575,20 @@ static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const
   requestArtworkDetail();
 }
 static void startCropZoom(FaceCrop target) {
-  zoomFrom=currentCrop;zoomTo=target;zoomStarted=millis();zoomLastDraw=0;zoomAnimating=true;
+  zoomFrom=currentCrop;zoomTo=motionCrop(target);zoomStarted=millis();zoomLastDraw=0;zoomAnimating=true;
+  activeZoomDuration=zoomDuration;activeZoomSmoothness=zoomSmoothness;
 }
 static void serviceCropZoom() {
   if(!zoomAnimating||!faceSource||transition.active||displayMode!=0||testCard)return;
   uint32_t now=millis();
-  if(zoomLastDraw&&now-zoomLastDraw<TRANSITION_FRAME_MS)return;
+  if(zoomLastDraw&&now-zoomLastDraw<1000UL/zoomFps)return;
   zoomLastDraw=now;
-  float t=(now-zoomStarted)/(float)zoomDuration;
-  currentCrop=interpolateCrop(zoomFrom,zoomTo,t);
-  if(t>=1&&currentCrop.side==FACE_SOURCE_SIZE)memcpy(frame,faceBase,FRAME_BYTES);
-  else if(t>=1)faceResizeClean(faceSource,faceWidth,frame,64,currentCrop);
-  else {
-    int scale=faceWidth;
-    FaceCrop sourceCrop{currentCrop.x*scale/FACE_SOURCE_SIZE,currentCrop.y*scale/FACE_SOURCE_SIZE,
-      max(1,currentCrop.side*scale/FACE_SOURCE_SIZE)};
-    faceResize(faceSource,faceWidth,faceWidth,frame,64,sourceCrop);
-  }
+  float t=(now-zoomStarted)/(float)activeZoomDuration;
+  currentCrop=interpolateMotion(zoomFrom,zoomTo,t,activeZoomSmoothness);
+  faceResizeMotion(faceSource,faceWidth,frame,64,currentCrop,faceBase);
   memcpy(compositeFrame,frame,FRAME_BYTES);
   drawFrame();
+  zoomRenderMs=millis()-now;
   if(t>=1) {
     zoomAnimating=false;displayGeneration=++nextDisplayGeneration;faceChangedAt=now;
   }
@@ -847,6 +845,8 @@ void loadSettings() {
   zoomHold=constrain(prefs.getUChar("zoomhold",18),3,60);
   zoomDelay=constrain(prefs.getUChar("zoomdelay",30),1,120);
   zoomDuration=constrain(prefs.isKey("zoomdur")?prefs.getUShort("zoomdur",3000):3000,500,8000);
+  zoomFps=constrain(prefs.getUChar("zoomfps",30),12,30);
+  zoomSmoothness=constrain(prefs.getUChar("zoomsmooth",100),0,100);
   // One-time migration requested for 3.3: install the recommended clean
   // profile, then retain subsequent remote adjustments on every reboot.
   if (!prefs.isKey("im_profile") || prefs.getUChar("im_profile",0)!=1) {
@@ -1680,6 +1680,9 @@ void handleStatus() {
   j += "\"zoom_delay\":" + String(zoomDelay) + ",";
   j += "\"zoom_animating\":" + String(zoomAnimating?"true":"false") + ",";
   j += "\"zoom_duration\":" + String(zoomDuration) + ",";
+  j += "\"zoom_fps\":" + String(zoomFps) + ",";
+  j += "\"zoom_smoothness\":" + String(zoomSmoothness) + ",";
+  j += "\"zoom_render_ms\":" + String(zoomRenderMs) + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
   j += "\"audio_rms\":" + String((int)audio::rms()) + ",";
   j += "\"has_frame\":" + String(hasFrame ? "true" : "false") + ",";
@@ -1771,6 +1774,8 @@ void handleFaceZoom() {
   if(server.hasArg("duration")) {
     zoomDuration=constrain(server.arg("duration").toInt(),500,8000);prefs.putUShort("zoomdur",zoomDuration);
   }
+  if(server.hasArg("fps")){zoomFps=constrain(server.arg("fps").toInt(),12,30);prefs.putUChar("zoomfps",zoomFps);}
+  if(server.hasArg("smoothness")){zoomSmoothness=constrain(server.arg("smoothness").toInt(),0,100);prefs.putUChar("zoomsmooth",zoomSmoothness);}
   if(server.hasArg("text")){textEnabled=server.arg("text").toInt()!=0;prefs.putBool("textzoom",textEnabled);if(textEnabled)requestArtworkDetail();else if(textIndex>=0)returnFullCover();}
   if(server.hasArg("saliency")){saliencyEnabled=server.arg("saliency").toInt()!=0;prefs.putBool("saliency",saliencyEnabled);regionsReady=false;}
   if(server.hasArg("sensitivity")){faceSensitivity=constrain(server.arg("sensitivity").toInt(),0,100);prefs.putUChar("facesens",faceSensitivity);faceTriedId=0;faceLastEmpty=0;faceCount=0;}
