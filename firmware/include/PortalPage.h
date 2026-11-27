@@ -35,7 +35,7 @@ pre{background:var(--sub);padding:12px;border-radius:9px;font-size:11px;overflow
 <section class="panel" data-panel="zoom" hidden>
 <h3>Smart zoom</h3>
 <p class="caption">Explore the artwork with faces, typography and visual details.</p>
-<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (music and Kan 88)</label>
+<label><input type="checkbox" id="facezoom" onchange="setFaceZoom()"> Enable automatic face zoom (music, Kan 88 and random artwork)</label>
 <label><input type="checkbox" id="textzoom" onchange="zoomSetting('text',this.checked?1:0)"> Enable text-region zoom</label>
 <label><input type="checkbox" id="quadzoom" onchange="setQuadrantZoom()"> Enable quadrant zoom (fallback if no faces or text)</label>
 <label><input type="checkbox" id="saliency" onchange="zoomSetting('saliency',this.checked?1:0)"> Prioritize visually detailed quadrants</label>
@@ -236,14 +236,14 @@ function loadStatus(){clearTimeout(statusTimer);if(document.hidden||statusBusy){
  $('otaCheck').disabled=!s.wifi_connected||!otaToken||[1,4,6].includes(otaState);
  $('otaInstall').disabled=otaState!==2||!s.wifi_connected;
  if(!ambientBusy)ambientFields.forEach(function(f){var id='am_'+f[0];if(document.activeElement.id!==id&&s[id]!=null){$(id).value=s[id];if(!f[5])$('av_'+f[0]).textContent=s[id];}});
- $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!s.face_apple_music||!s.face_count||s.transition_active;
+ $('facezoom').checked=!!s.face_enabled;$('nextFace').disabled=!s.face_enabled||!(s.face_eligible||s.face_apple_music)||!s.face_count||s.transition_active;
  $('quadzoom').checked=!!s.quadrant_enabled;$('nextQuad').disabled=!s.quadrant_enabled||!s.has_frame||s.transition_active;
  $('textzoom').checked=!!s.text_enabled;$('saliency').checked=!!s.saliency_enabled;$('nextText').disabled=!s.text_enabled||!s.text_count||s.transition_active;
  $('rescan').disabled=!!s.face_pending||!s.has_frame;
  $('fullFace').disabled=(s.face_index==null||s.face_index<0)&&(s.quadrant_index==null||s.quadrant_index<0)&&(s.text_index==null||s.text_index<0)&&!s.zoom_animating;
  [['facesens','face_sensitivity'],['zoomdepth','zoom_depth'],['zoomdelay','zoom_delay'],['zoomhold','zoom_hold'],['zoomfps','zoom_fps'],['zoomsmooth','zoom_smoothness']].forEach(function(p){if(document.activeElement.id!==p[0]&&s[p[1]]!=null){$(p[0]).value=s[p[1]];$(p[0]+'v').textContent=s[p[1]];}});
  if(document.activeElement.id!=='zoomdur'&&s.zoom_duration!=null){$('zoomdur').value=s.zoom_duration;$('zoomdurv').textContent=s.zoom_duration;}
- $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled&&!s.text_enabled?'Off':s.face_pending?'Scanning face tiles…':(s.face_enabled&&s.face_apple_music?(s.face_count||0)+' face(s), ':'')+(s.text_enabled?(s.text_count||0)+' text region(s)':'Detail mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.text_index>=0?' — text '+(s.text_index+1)+' / '+s.text_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
+ $('faceStatus').textContent=s.face_recovery?'Face detection disabled after interruption — enable to retry':!s.face_enabled&&!s.quadrant_enabled&&!s.text_enabled?'Off':s.face_detail_waiting?'Loading high-resolution cover…':s.face_pending?'Scanning face tiles…':(s.face_random?'Random artwork — ':'')+(s.face_enabled&&(s.face_eligible||s.face_apple_music)?(s.face_count||0)+' face(s), ':'')+(s.text_enabled?(s.text_count||0)+' text region(s)':'Detail mode')+(s.face_index>=0?' — face '+(s.face_index+1)+' / '+s.face_count:s.text_index>=0?' — text '+(s.text_index+1)+' / '+s.text_count:s.quadrant_index>=0?' — quadrant '+(s.quadrant_index+1)+' / 4':' — full cover')+(s.zoom_animating?' — transitioning':'')+' — '+(s.face_source_px||64)+'px source';
  $('summary').innerHTML='<div class="card">Playback<b>'+esc(s.playback||'unknown')+'</b></div><div class="card">Ambient<b>'+esc(ambientFields[0][5][s.am_mode]||'Off')+'</b></div><div class="card">Library<b>'+esc(s.pack_count||0)+' covers</b></div><div class="card">Network<b>'+esc(s.last_network_latency_ms||0)+' ms</b></div>';
  $('nextBtn').disabled=playing||submitting||!s.pack_count;$('nextBtn').title=playing?'Next is available while playback is idle':(!s.pack_count?'Fallback pack is still syncing':'');
  $('refreshBtn').disabled=submitting;

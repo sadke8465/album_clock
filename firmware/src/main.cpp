@@ -23,6 +23,7 @@
 #include "OtaUpdate.h"
 #include "FaceZoom.h"
 #include "SmartRegions.h"
+#include "ZoomSourcePolicy.h"
 #include "human_face_detect_msr01.hpp"
 #include "WiimSource.h"
 
@@ -54,13 +55,15 @@ static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, faceP
 static uint16_t faceBase[4096];
 static uint16_t *faceSource=nullptr;
 static int faceWidth=64;
-static bool faceRecovery=false, faceReady=false,faceLiveMusic=false,faceRadioArtwork=false;
+static bool faceRecovery=false, faceReady=false,faceLiveMusic=false,faceRadioArtwork=false,faceRandomArtwork=false;
 static uint64_t faceFingerprint=0,faceLastEmpty=0;
 static uint32_t facePendingAt=0;
 static String faceDetailPath;
 static bool faceDetailRequested=false,faceDetailWaiting=false;
 static uint8_t faceDetailAttempts=0;
 static uint32_t faceDetailRetryAt=0;
+static uint32_t faceDetailStartedAt=0,faceScanRetryAt=0;
+static uint8_t faceScanAttempts=0;
 RTC_NOINIT_ATTR static uint32_t faceInferenceMarker;
 static constexpr uint32_t FACE_BUSY_MAGIC=0xface3410;
 static uint32_t faceArtworkId=0, faceChangedAt=0;
@@ -539,7 +542,10 @@ static void runFaceDetection(FaceJob job, bool radio) {
     vTaskDelay(1);
 }
 static void requestFaceDetection() {
-  if(!faceReady||!faceEnabled||!faceLiveMusic||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||faceTriedId==faceArtworkId)return;
+  if(!faceReady||!faceEnabled||!faceArtworkEligible(faceLiveMusic,faceRandomArtwork)||
+     (faceRandomArtwork&&playbackActive)||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||
+     faceTriedId==faceArtworkId||faceScanAttempts>=3||
+     (faceScanRetryAt&&(int32_t)(millis()-faceScanRetryAt)<0))return;
   faceTriedId=faceArtworkId;
   uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
   for(const auto &cached:faceCache)if(cached.fingerprint==fingerprint&&cached.count>0&&cached.count<=FACE_MAX){
@@ -548,32 +554,35 @@ static void requestFaceDetection() {
   }
   if(faceLastEmpty==fingerprint)return;
   uint16_t *copy=(uint16_t *)heap_caps_malloc(faceWidth*faceWidth*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-  if(!copy)return;
+  if(!copy){faceTriedId=0;faceScanRetryAt=millis()+3000;++faceScanAttempts;return;}
   memcpy(copy,faceSource,faceWidth*faceWidth*2);
   FaceJob old;
   if(xQueueReceive(faceJobs,&old,0)==pdTRUE)free(old.pixels);
   FaceJob job{faceArtworkId,copy,faceWidth,fingerprint,faceSensitivity};
-  if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();}else free(copy);
+  if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();++faceScanAttempts;}
+  else {free(copy);faceTriedId=0;faceScanRetryAt=millis()+3000;++faceScanAttempts;}
 }
-static void serviceFaceJob(bool musicAllowed,bool radio=false) {
+static void serviceFaceJob(bool musicAllowed,bool idleAllowed,bool radio=false) {
   FaceJob job;
   if(!faceJobs||xQueueReceive(faceJobs,&job,0)!=pdTRUE)return;
-  if(musicAllowed&&faceEnabled&&faceLiveMusic&&job.id==faceArtworkId)runFaceDetection(job,radio);
+  if(faceEnabled&&faceScanAllowed(faceLiveMusic,faceRandomArtwork,musicAllowed,idleAllowed)&&job.id==faceArtworkId)
+    runFaceDetection(job,radio||faceRandomArtwork); // bounded scan; yield to the next WiiM poll
   else {free(job.pixels);FaceResult result{};result.id=job.id;xQueueOverwrite(faceResults,&result);}
 }
 static void requestArtworkDetail(){
   if(!detailJobs||faceDetailed||faceDetailRequested||faceDetailAttempts>=3||
      (faceDetailRetryAt&&(int32_t)(millis()-faceDetailRetryAt)<0)||!faceDetailPath.length()||
-     (!quadrantEnabled&&!textEnabled&&!(faceEnabled&&faceLiveMusic)))return;
+     (!quadrantEnabled&&!textEnabled&&!(faceEnabled&&faceArtworkEligible(faceLiveMusic,faceRandomArtwork))))return;
   DetailJob job{};job.id=faceArtworkId;strlcpy(job.path,faceDetailPath.c_str(),sizeof(job.path));
-  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;++faceDetailAttempts;
+  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;faceDetailStartedAt=millis();++faceDetailAttempts;
 }
-static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool liveMusic=false,bool radio=false) {
+static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool liveMusic=false,bool radio=false,bool random=false) {
   ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
   smartRegions=SmartRegions{};regionsReady=false;
   zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
   memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
-  faceLiveMusic=liveMusic;faceRadioArtwork=radio;
+  faceLiveMusic=liveMusic;faceRadioArtwork=radio;faceRandomArtwork=random;
+  faceScanAttempts=0;faceScanRetryAt=0;
   faceFingerprint=14695981039346656037ULL;
   for(int i=0;i<4096;i++){faceFingerprint^=source[i];faceFingerprint*=1099511628211ULL;}
   if(faceSource)free(faceSource);
@@ -610,7 +619,7 @@ static void returnFullCover() {
   if(faceBaseValid&&faceSource)startCropZoom({0,0,FACE_SOURCE_SIZE});
 }
 static bool advanceFace() {
-  if(!faceEnabled||!faceLiveMusic||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
+  if(!faceEnabled||!faceArtworkEligible(faceLiveMusic,faceRandomArtwork)||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
   quadrantIndex=-1;textIndex=-1;
   ++faceIndex;
   if(faceIndex>=faceCount)faceIndex=-1;
@@ -629,10 +638,10 @@ static bool advanceQuadrant() {
 }
 static void analyzeCurrentRegions() {
   if(regionsReady||!faceSource||faceDetailWaiting||(!textEnabled&&!saliencyEnabled))return;
-  regionsReady=true;
   int n=min(faceWidth,128);
   uint8_t *gray=(uint8_t *)heap_caps_malloc(n*n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
   if(!gray)return;
+  regionsReady=true;
   for(int y=0;y<n;y++)for(int x=0;x<n;x++){
     uint16_t v=faceSource[(y*faceWidth/n)*faceWidth+x*faceWidth/n];
     gray[y*n+x]=(imageR(v)*77+imageG(v)*150+imageB(v)*29)>>8;
@@ -648,9 +657,14 @@ static bool advanceText(){
   faceChangedAt=millis();return true;
 }
 static void serviceFaces() {
+  // A queued detail request must not indefinitely block local fallback zoom.
+  if(faceDetailWaiting&&millis()-faceDetailStartedAt>15000){faceDetailWaiting=false;}
   if(facePending&&millis()-facePendingAt>20000){
-    facePending=false;faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
-    Serial.println("Face detector timed out, disabled for stability");
+    facePending=false;
+    if(faceInferenceMarker==FACE_BUSY_MAGIC){
+      faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
+      Serial.println("Face detector timed out, disabled for stability");
+    }else{faceTriedId=0;faceScanRetryAt=millis()+3000;}
   }
   if(faceResults) {
     FaceResult result;
@@ -663,16 +677,19 @@ static void serviceFaces() {
         memcpy(slot.crops,result.crops,sizeof(slot.crops));
         prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
       }else if(result.ran)faceLastEmpty=result.fingerprint;
+      else if(faceScanAttempts<3){faceTriedId=0;faceScanRetryAt=millis()+3000;}
     }
   }
   if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0){requestArtworkDetail();analyzeCurrentRegions();requestFaceDetection();}
   serviceCropZoom();
   if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0&&textIndex<0)?zoomDelay*1000UL:zoomHold*1000UL)) {
-    if(quadrantEnabled&&quadrantIndex>=0)advanceQuadrant();
-    else if(textEnabled&&textIndex>=0)advanceText();
-    else if(faceEnabled&&faceCount)advanceFace();
-    else if(textEnabled&&smartRegions.textCount&&(!faceEnabled||!facePending))advanceText();
-    else if(quadrantEnabled&&(!faceEnabled||!facePending))advanceQuadrant();
+    switch(chooseSmartZoom(faceEnabled,faceCount,facePending,textEnabled,smartRegions.textCount,
+      quadrantEnabled,faceDetailWaiting,textIndex,quadrantIndex)){
+      case SmartZoomChoice::Face:advanceFace();break;
+      case SmartZoomChoice::Text:advanceText();break;
+      case SmartZoomChoice::Quadrant:advanceQuadrant();break;
+      default:break;
+    }
   }
 }
 
@@ -1335,7 +1352,7 @@ void networkTask(void *) {
   uint32_t generation = 0;
   String shownKey, radioHash, knownPack = localPack.version;
   RemoteSnapshot pack;
-  bool active = false, wasRadio = false, lastWasMusic=false;
+  bool active = false, wasRadio = false, lastWasMusic=false,lastWasIdle=false;
   uint32_t pollDelay=STATE_POLL_INTERVAL_MS;
   configTime(0, 0, "pool.ntp.org", "time.google.com");
   for (;;) {
@@ -1354,9 +1371,10 @@ void networkTask(void *) {
       // radio/track update. Stale detail requests can be discarded outright.
       DetailJob detailJob;
       if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE&&detailJob.id==faceArtworkId){
-        uint16_t *detail=fetchArtworkDetail(detailJob.path,wasRadio);
+        // Random artwork must not steal time from a newly started song.
+        uint16_t *detail=faceRandomArtwork&&!lastWasIdle?nullptr:fetchArtworkDetail(detailJob.path,wasRadio);
         pushNetworkEvent(NetworkEventType::Detail,detailJob.id,false,0,nullptr,detail?"Artwork detail ready":"Artwork detail unavailable",detail);
-      } else serviceFaceJob(lastWasMusic,wasRadio);
+      } else serviceFaceJob(lastWasMusic,lastWasIdle,wasRadio);
       continue;
     }
     lastPoll = now;
@@ -1370,6 +1388,7 @@ void networkTask(void *) {
       if (!idleSince) idleSince = now;
       if (now - idleSince >= 10000) { active = false; shownKey = ""; }
     } else idleSince = 0; // Failed reads are not evidence that music stopped.
+    lastWasIdle=!active&&!recognized;
     RemoteSnapshot *snapshot = new RemoteSnapshot;
     snapshot->playing = active;
     snapshot->playback = active ? "playing" : "idle";
@@ -1434,7 +1453,7 @@ void networkTask(void *) {
     }
     networkBusy = false;
     // Radio inference is deferred to the next spare polling window.
-    if(wasRadio)lastPoll=millis();else serviceFaceJob(lastWasMusic);
+    if(wasRadio)lastPoll=millis();else serviceFaceJob(lastWasMusic,lastWasIdle);
   }
 }
 
@@ -1540,7 +1559,7 @@ bool beginNextFallback(bool manual) {
   prefs.putUShort("packcursor", localPack.cursor);
   prefs.putUShort("packlast", localPack.lastIndex);
   lastFallbackAt = millis();
-  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging),nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(index)+".rgb565");
+  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging),nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(index)+".rgb565",false,false,true);
   startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
   lastResult = "local fallback ready";
   return true;
@@ -1585,7 +1604,9 @@ void processNetworkEvents() {
           if(faceSource)free(faceSource);
           faceSource=event.detail;event.detail=nullptr;faceDetailed=true;faceWidth=FACE_DETAIL_SIZE;
           faceCount=0;faceIndex=-1;facePending=false;
+          faceScanAttempts=0;faceScanRetryAt=0;
           regionsReady=false;smartRegions=SmartRegions{};
+          if(textIndex>=0||quadrantIndex>=0||zoomAnimating)returnFullCover();
         } else if(faceDetailAttempts<3){faceDetailRequested=false;faceDetailRetryAt=millis()+2000;}
         requestFaceDetection();
       }
@@ -1674,6 +1695,9 @@ void handleStatus() {
   j += "\"face_apple_music\":" + String(faceLiveMusic?"true":"false") + ",";
   j += "\"face_live_music\":" + String(faceLiveMusic?"true":"false") + ",";
   j += "\"face_radio\":" + String(faceRadioArtwork?"true":"false") + ",";
+  j += "\"face_random\":" + String(faceRandomArtwork?"true":"false") + ",";
+  j += "\"face_eligible\":" + String(faceArtworkEligible(faceLiveMusic,faceRandomArtwork)?"true":"false") + ",";
+  j += "\"face_detail_waiting\":" + String(faceDetailWaiting?"true":"false") + ",";
   j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
   j += "\"face_count\":" + String(faceCount) + ",";
   j += "\"face_index\":" + String(faceIndex) + ",";
@@ -1771,7 +1795,7 @@ void handleFaceZoom() {
     bool enabled=server.arg("value").toInt()!=0;
     if(enabled!=faceEnabled) {
       faceEnabled=enabled;prefs.putBool("facezoom",faceEnabled);
-      if(enabled) {faceRecovery=false;faceTriedId=0;faceLastEmpty=0;if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);faceChangedAt=millis();}
+      if(enabled) {faceRecovery=false;faceTriedId=0;faceLastEmpty=0;faceScanAttempts=0;faceScanRetryAt=0;if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);requestArtworkDetail();faceChangedAt=millis();}
       else {
         if(faceIndex>=0&&faceBaseValid)returnFullCover();
       }
@@ -1790,7 +1814,7 @@ void handleFaceZoom() {
   if(server.hasArg("smoothness")){zoomSmoothness=constrain(server.arg("smoothness").toInt(),0,100);prefs.putUChar("zoomsmooth",zoomSmoothness);}
   if(server.hasArg("text")){textEnabled=server.arg("text").toInt()!=0;prefs.putBool("textzoom",textEnabled);if(textEnabled)requestArtworkDetail();else if(textIndex>=0)returnFullCover();}
   if(server.hasArg("saliency")){saliencyEnabled=server.arg("saliency").toInt()!=0;prefs.putBool("saliency",saliencyEnabled);regionsReady=false;}
-  if(server.hasArg("sensitivity")){faceSensitivity=constrain(server.arg("sensitivity").toInt(),0,100);prefs.putUChar("facesens",faceSensitivity);faceTriedId=0;faceLastEmpty=0;faceCount=0;}
+  if(server.hasArg("sensitivity")){faceSensitivity=constrain(server.arg("sensitivity").toInt(),0,100);prefs.putUChar("facesens",faceSensitivity);faceTriedId=0;faceLastEmpty=0;faceCount=0;faceScanAttempts=0;faceScanRetryAt=0;}
   if(server.hasArg("depth")){zoomDepth=constrain(server.arg("depth").toInt(),50,150);prefs.putUChar("zoomdepth",zoomDepth);}
   if(server.hasArg("hold")){zoomHold=constrain(server.arg("hold").toInt(),3,60);prefs.putUChar("zoomhold",zoomHold);}
   if(server.hasArg("delay")){zoomDelay=constrain(server.arg("delay").toInt(),1,120);prefs.putUChar("zoomdelay",zoomDelay);}
@@ -1799,7 +1823,8 @@ void handleFaceZoom() {
     uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
     for(auto &cached:faceCache)if(cached.fingerprint==fingerprint)cached=FaceCacheEntry{};
     prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
-    faceTriedId=0;faceLastEmpty=0;faceCount=0;regionsReady=false;
+    faceTriedId=0;faceLastEmpty=0;faceCount=0;regionsReady=false;faceScanAttempts=0;faceScanRetryAt=0;
+    if(!faceDetailed){faceDetailAttempts=0;faceDetailRequested=false;faceDetailWaiting=false;faceDetailRetryAt=0;requestArtworkDetail();}
     returnFullCover();
   }
   if(server.hasArg("nexttext")&&!advanceText()){server.send(409,"text/plain","No available text regions");return;}
@@ -2072,7 +2097,9 @@ void setup() {
   loadLocalPack();
   if (loadCachedFrame()) {
     hasFrame = true;
-    setFaceArtwork(frame);
+    if(localPack.valid&&localPack.lastIndex<localPack.count&&readFallbackFrame(localPack.lastIndex,staging)&&!memcmp(frame,staging,FRAME_BYTES))
+      setFaceArtwork(frame,nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(localPack.lastIndex)+".rgb565",false,false,true);
+    else setFaceArtwork(frame);
     memcpy(compositeFrame, frame, FRAME_BYTES);
     if (fadeEnabled) {
       memcpy(staging, frame, FRAME_BYTES);

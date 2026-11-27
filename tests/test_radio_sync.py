@@ -10,7 +10,7 @@ class RadioSyncTests(unittest.TestCase):
         self.assertIn('RADIO_POLL_INTERVAL_MS 1500UL', config)
         self.assertIn('now-lastRadioPoll >= RADIO_POLL_INTERVAL_MS', main)
         self.assertIn('radio||strcmp(event.message,"WiiM artwork")==0', main)
-        self.assertIn('faceEnabled&&faceLiveMusic', main)
+        self.assertIn('faceEnabled&&faceScanAllowed(faceLiveMusic,faceRandomArtwork,musicAllowed,idleAllowed)', main)
         self.assertIn('++nextDisplayGeneration,radio)', main)
         self.assertIn('readServiceJson("/v1/radio/kan88/state", json,3500)', main)
 
