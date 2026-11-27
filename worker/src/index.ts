@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
-import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, type RadioTrack } from "./radio-match";
+import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, radioReleaseQuality, radioAlbumKey, type RadioTrack } from "./radio-match";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -44,6 +44,7 @@ const ALBUMS = albumsFromCsv(albumsCsv);
 const DETAIL_SIZE = 512;
 const DETAIL_BYTES = DETAIL_SIZE * DETAIL_SIZE * 2;
 const DETAIL_CATALOG = new Map(parseCsv(albumsCsv).map(row => [row.id, row]));
+const RADIO_POLICY = 4;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -537,6 +538,8 @@ export class NowPlayingCoordinator extends DurableObject<Env> {
   private radioRefresh: Promise<void> | null = null;
   private radioJobs = new Map<string, Promise<void>>();
   private radioRetryAt = new Map<string, number>();
+  private radioAttempts = new Map<string,number>();
+  private radioPublishedAt = 0;
 
   async getRadioState(): Promise<JsonRecord> {
     if (!this.radioLoaded) this.radioLoaded = (async () => {
@@ -554,37 +557,51 @@ export class NowPlayingCoordinator extends DurableObject<Env> {
     const track = this.radioTrack&&Date.now()<=this.radioTrack.end+15000?this.radioTrack:null;
     return { ...this.radioLast,
       cover_url:this.radioLast?.sha256?`/v1/radio/cover/${this.radioLast.sha256}`:undefined,
-      status: track && this.radioLast?.track_key === track.key ? "ready" : track ? "searching" : this.radioLast ? "holding" : "waiting",
+      status: track && this.radioLast?.track_key === track.key && this.radioLast.policy===RADIO_POLICY ? "ready" : track ? "searching" : this.radioLast ? "holding" : "waiting",
       current_title: track?.title ?? "", current_artists: track?.artists ?? [],
       current_start: track?.start ?? null, current_end: track?.end ?? null,
-      checked_at: this.radioCheckAt, retry_after_ms: 1500 };
+      checked_at: this.radioCheckAt, published_at:this.radioPublishedAt||null,
+      lookup_attempt:track?this.radioAttempts.get(track.key)??0:0,retry_after_ms: 1500 };
   }
 
   private async refreshRadio(): Promise<void> {
     try {
       const track = await getRadioTrack(this.env);
       this.radioTrack = track;
-      if (!track || this.radioLast?.track_key === track.key || this.radioJobs.has(track.key) ||
+      const same=track&&this.radioLast?.track_key===track.key&&this.radioLast.policy===RADIO_POLICY;
+      if (!track || (same&&this.radioLast?.release_quality==="original") || this.radioJobs.has(track.key) ||
           (this.radioRetryAt.get(track.key) ?? 0) > Date.now()) return;
-      const job = this.resolveRadio(track).finally(() => { this.radioJobs.delete(track.key); });
+      const job = this.resolveRadio(track,!!same).finally(() => { this.radioJobs.delete(track.key); });
       this.radioJobs.set(track.key, job);
       this.ctx.waitUntil(job);
     } catch { /* Feed failures retain the last verified artwork. */ }
   }
 
-  private async resolveRadio(track: RadioTrack): Promise<void> {
+  private async resolveRadio(track: RadioTrack, improve=false): Promise<void> {
+    const started=Date.now(),attempt=(this.radioAttempts.get(track.key)??0)+1;
+    this.radioAttempts.set(track.key,attempt);
+    if(this.radioAttempts.size>64)this.radioAttempts.delete(this.radioAttempts.keys().next().value!);
     try {
-      const value = await resolveRadioCover(this.env, track);
+      const value = await resolveRadioCover(this.env, track,improve);
       if (!value) {
         // No-match is deliberately short-lived; transient search failures
         // should never lock out a song for its entire airtime.
-        this.radioRetryAt.set(track.key, Date.now()+12_000);
+        this.radioRetryAt.set(track.key, Date.now()+Math.min(30_000,8_000*attempt));
         if (this.radioRetryAt.size > 64) this.radioRetryAt.delete(this.radioRetryAt.keys().next().value!);
         return;
       }
       if (!canPublishRadio(track,this.radioTrack,Date.now())) return;
-      this.radioLast = value;
-      await this.ctx.storage.put("radio-last-v3", value);
+      // Never flip between two fallback compilations. Replace a tentative
+      // cover when an actual original becomes available on a subsequent pass.
+      if(!improve||value.release_quality==="original"){
+        this.radioLast={...value,lookup_ms:Date.now()-started};
+        this.radioPublishedAt=Date.now();
+        this.ctx.waitUntil(Promise.allSettled([
+          this.ctx.storage.put("radio-last-v3",this.radioLast),
+          radioCacheKey(track).then(key=>this.env.KV.put(key,JSON.stringify(value),{expirationTtl:value.release_quality==="original"?2592000:3600}))
+        ]).then(()=>{}));
+      }
+      if(value.release_quality!=="original")this.radioRetryAt.set(track.key,Date.now()+Math.min(45000,22000*attempt));
     } catch { this.radioRetryAt.set(track.key, Date.now()+4_000); }
   }
 
@@ -856,14 +873,36 @@ async function serveCurrentManifest(env: Env): Promise<Response> {
 }
 
 
-interface RadioCover { title: string; artists: string[]; album: string; sha256: string; track_key?: string; cover_url?: string; source?: string; score?: number; }
-interface RadioCandidate { image: string; album: string; score: number; source: string; date: string; compilation: boolean; single: boolean; }
+interface RadioCover { title: string; artists: string[]; album: string; sha256: string; track_key?: string; cover_url?: string; source?: string; score?: number; policy?:number; release_quality?:'original'|'fallback'; album_date?:string; lookup_ms?:number; }
+interface RadioCandidate { image: string; album: string; score: number; source: string; date: string; compilation: boolean; single: boolean; albumDate?:string; appleId?:string; order?:number; }
+
+async function radioCacheKey(track:RadioTrack):Promise<string>{
+  return `kan88:track:v${RADIO_POLICY}:`+await hashBytes(new TextEncoder().encode(track.key));
+}
+
+// Unlike the legacy header-only timeout, these deadlines cover the response
+// body too. A slow catalogue/CDN cannot leave the shared resolver busy forever.
+async function radioJson(url:string,env:Env,timeout:number):Promise<unknown>{
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeout);
+  try{
+    const response=await fetch(url,{signal:controller.signal,headers:{"User-Agent":ua(env),Accept:"application/json","Cache-Control":"no-cache"}});
+    if(response.status===204)return null;
+    if(!response.ok)throw new Error(`GET ${url} -> ${response.status}`);
+    return await response.json();
+  }finally{clearTimeout(timer);}
+}
+async function radioImage(url:string,env:Env,controller:AbortController):Promise<ArrayBuffer>{
+  const timer=setTimeout(()=>controller.abort(),2800);
+  try{
+    const response=await fetch(url,{signal:controller.signal,headers:{"User-Agent":ua(env),Accept:"image/jpeg,image/png,image/webp,image/*;q=0.8"},cf:{cacheEverything:true,cacheTtl:86400}});
+    if(!response.ok)throw new Error(`Artwork HTTP ${response.status}`);
+    const bytes=await response.arrayBuffer();if(bytes.byteLength>8*1024*1024)throw new Error("Artwork too large");return bytes;
+  }finally{clearTimeout(timer);}
+}
 
 async function getRadioTrack(env: Env): Promise<RadioTrack | null> {
-  const response = await fetchWithTimeout("https://www.kan.org.il/api/arc-cloud/get-live-track-data?channelId=4",
-    { headers: { "User-Agent": ua(env), Accept: "application/json", "Cache-Control": "no-cache" } }, 2500);
-  if (!response.ok || response.status === 204) return null;
-  return parseRadioTrack(await response.json(),Date.now());
+  const data=await radioJson("https://www.kan.org.il/api/arc-cloud/get-live-track-data?channelId=4",env,2500);
+  return parseRadioTrack(data,Date.now());
 }
 
 function radioImageType(bytes: ArrayBuffer): string {
@@ -874,36 +913,36 @@ function radioImageType(bytes: ArrayBuffer): string {
   throw new Error("Unsupported radio artwork format");
 }
 
-async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCover | null> {
+async function resolveRadioCover(env: Env, track: RadioTrack, improve=false): Promise<RadioCover | null> {
   const {title,artists}=track;
   const searchTitle=radioSearchTitle(title)||title;
-  const key="kan88:track:v3:"+await hashBytes(new TextEncoder().encode(track.key));
-  const cached=await env.KV.get<RadioCover>(key,"json").catch(()=>null);
-  if(cached?.sha256&&cached.cover_url)return cached;
+  const key=await radioCacheKey(track);
+  const cached=improve?null:await env.KV.get<RadioCover>(key,"json").catch(()=>null);
+  if(cached?.sha256&&cached.cover_url&&cached.policy===RADIO_POLICY)return cached;
   const add=(rowTitle:unknown,rowArtist:unknown,image:string,album:string,source:string,date="",isCompilation=false,isSingle=false):RadioCandidate[]=>{
     const score=radioMatchScore(title,artists,rowTitle,rowArtist);
     return score&&/^https:\/\//.test(image)?[{image,album,score,source,date,compilation:isCompilation||radioCompilation(album),single:isSingle||/\s-\s(?:single|ep)$/i.test(album)}]:[];
   };
   const apple=async(term:string,country:string):Promise<RadioCandidate[]>=>{
-    const data=asRecord(await fetchJson("https://itunes.apple.com/search?"+new URLSearchParams({term,country,entity:"song",limit:"65"}),env,2200));
-    return (Array.isArray(data?.results)?data.results:[]).flatMap(item=>{
+    const data=asRecord(await radioJson("https://itunes.apple.com/search?"+new URLSearchParams({term,country,entity:"song",limit:"50"}),env,3300));
+    return (Array.isArray(data?.results)?data.results:[]).flatMap((item,order)=>{
       const row=asRecord(item);
       return add(row?.trackName,row?.artistName,stringValue(row?.artworkUrl100).replace(/100x100(?:bb)?/,"600x600bb"),
-        stringValue(row?.collectionName),"Apple Music "+country.toUpperCase(),stringValue(row?.releaseDate),
-        /various artists|אמנים שונים/i.test(stringValue(row?.collectionArtistName)));
+        stringValue(row?.collectionName),"Apple Music "+country.toUpperCase(),stringValue(row?.releaseDate))
+        .map(c=>({...c,appleId:typeof row?.collectionId==="number"?String(row.collectionId):undefined,order}));
     });
   };
   const deezer=async(queryTitle=searchTitle):Promise<RadioCandidate[]>=>{
-    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+queryTitle,limit:"40"}),env,2200));
-    return (Array.isArray(data?.data)?data.data:[]).flatMap(item=>{
+    const data=asRecord(await radioJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+queryTitle,limit:"40"}),env,2800));
+    return (Array.isArray(data?.data)?data.data:[]).flatMap((item,order)=>{
       const row=asRecord(item),artist=asRecord(row?.artist),album=asRecord(row?.album);
-      return add(row?.title,artist?.name,stringValue(album?.cover_big)||stringValue(album?.cover_medium),stringValue(album?.title),"Deezer");
+      return add(row?.title,artist?.name,stringValue(album?.cover_big)||stringValue(album?.cover_medium),stringValue(album?.title),"Deezer").map(c=>({...c,order}));
     });
   };
   const musicbrainz=async():Promise<RadioCandidate[]>=>{
     const quote=(v:string)=>v.replace(/[\\"]/g,"\\$&");
     const q=new URLSearchParams({query:'recording:"'+quote(searchTitle)+'" AND artist:"'+quote(artists[0])+'"',fmt:"json",limit:"15"});
-    const data=asRecord(await fetchJson("https://musicbrainz.org/ws/2/recording/?"+q,env,2200));
+    const data=asRecord(await radioJson("https://musicbrainz.org/ws/2/recording/?"+q,env,2600));
     return (Array.isArray(data?.recordings)?data.recordings:[]).flatMap(item=>{
       const rec=asRecord(item), credits=Array.isArray(rec?.["artist-credit"])?rec["artist-credit"]:[];
       const artist=credits.map(v=>{const c=asRecord(v);return stringValue(c?.name)+stringValue(c?.joinphrase);}).join("");
@@ -911,52 +950,82 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
         const rel=asRecord(item), group=asRecord(rel?.["release-group"]), id=stringValue(rel?.id);
         if(!/^[0-9a-f-]{36}$/.test(id))return [];
         const types=Array.isArray(group?.["secondary-types"])?group["secondary-types"]:[];
-        return add(rec?.title,artist,"https://coverartarchive.org/release/"+id+"/front-500",stringValue(rel?.title),"MusicBrainz",
-          stringValue(rel?.date),types.includes("Compilation"),group?.["primary-type"]==="Single"||group?.["primary-type"]==="EP");
+        const date=stringValue(rel?.date),recorded=stringValue(rec?.["first-release-date"])||date;
+        const candidates=add(rec?.title,artist,"https://coverartarchive.org/release/"+id+"/front-500",stringValue(rel?.title),"MusicBrainz",
+          recorded,types.includes("Compilation"),group?.["primary-type"]==="Single"||group?.["primary-type"]==="EP").map(c=>({...c,albumDate:date}));
+        const groupId=stringValue(group?.id);
+        if(/^[0-9a-f-]{36}$/.test(groupId))candidates.push(...candidates.map(c=>({...c,image:"https://coverartarchive.org/release-group/"+groupId+"/front-500"})));
+        return candidates;
       });
     });
   };
-  // Parallel catalogue requests: no repeated 2.2s waits per country/provider.
-  // The extra title-only search helps with localized artist aliases.
+  // Start fewer requests per Apple storefront to avoid rate limiting. Other
+  // markets, title-only, and alternate artists are used on the second pass.
   const term=artists[0]+" "+searchTitle;
-  const results=await Promise.allSettled([apple(term,"il"),apple(searchTitle,"il"),apple(term,"us"),apple(term,"gb"),deezer(),musicbrainz()]);
+  const results=await Promise.allSettled([apple(term,"il"),apple(term,"us"),deezer(),musicbrainz()]);
   const candidates=results.flatMap(r=>r.status==="fulfilled"?r.value:[]);
   // Israeli stations sometimes give only the transliterated title while
   // catalogue search indexes only Hebrew. Use phonetic queries as a bounded
   // second pass only when the normal searches found no confident match.
-  if(!candidates.some(c=>c.score>=180)){
-    const alternates=hebrewSearchVariants(searchTitle);
-    if(alternates.length){
-      const additional=await Promise.allSettled([...alternates.map(t=>apple(artists[0]+" "+t,"il")),deezer(alternates[0])]);
-      candidates.push(...additional.flatMap(r=>r.status==="fulfilled"?r.value:[]));
-    }
+  if(improve||!candidates.some(c=>c.score>=190&&!c.compilation)){
+    const alternates=candidates.some(c=>c.score>=180)?[]:hebrewSearchVariants(searchTitle);
+    const jobs=[apple(searchTitle,"il"),apple(term,"gb"),...alternates.map(t=>apple(artists[0]+" "+t,"il"))];
+    if(alternates[0])jobs.push(deezer(alternates[0]));
+    if(artists[1])jobs.push(apple(artists[1]+" "+(alternates[0]||searchTitle),"il"));
+    const additional=await Promise.allSettled(jobs.slice(0,6));
+    candidates.push(...additional.flatMap(r=>r.status==="fulfilled"?r.value:[]));
+  }
+  // Begin downloading the most plausible covers while verifying collection
+  // dates. The final ranking still determines what gets published.
+  rankRadioReleases(candidates);
+  const downloads=new Map<string,{job:Promise<ArrayBuffer|null>;controller:AbortController}>();
+  const download=(url:string)=>{
+    const prior=downloads.get(url);if(prior)return prior.job;
+    const controller=new AbortController(),job=radioImage(url,env,controller).catch(()=>null);
+    downloads.set(url,{job,controller});return job;
+  };
+  [...new Set(candidates.slice(0,4).map(c=>c.image))].slice(0,2).forEach(url=>download(url));
+  // Track releaseDate is often the same on a 1976 studio album and a 2002
+  // greatest-hits compilation. A single batched album lookup reveals the
+  // actual collection's release date and avoids this false equivalence.
+  const ids=[...new Set(candidates.filter(c=>c.score>=180&&c.appleId).map(c=>c.appleId!))].slice(0,16);
+  if(ids.length){
+    try{
+      const data=asRecord(await radioJson("https://itunes.apple.com/lookup?"+new URLSearchParams({id:ids.join(","),entity:"album",country:"il"}),env,2300));
+      const albums=new Map((Array.isArray(data?.results)?data.results:[]).map(v=>{const row=asRecord(v);return [String(row?.collectionId),row] as const;}));
+      for(const c of candidates)if(c.appleId){
+        const row=albums.get(c.appleId);if(!row)continue;
+        c.albumDate=stringValue(row.releaseDate);
+        if(typeof row.trackCount==="number"&&row.trackCount>45)c.compilation=true;
+        if(typeof row.trackCount==="number"&&row.trackCount<=3)c.single=true;
+      }
+    }catch{ /* Unavailable release metadata is not fabricated. */ }
   }
   // Prefer original studio albums, then earliest release, for comparably
   // confident matches. An exact compilation still beats a weak wrong song.
   rankRadioReleases(candidates);
   const seen=new Set<string>(),albumCounts=new Map<string,number>();
   const unique=candidates.filter(c=>{
-    const album=c.album.normalize("NFKC").trim().toLowerCase();
+    const album=radioAlbumKey(c.album);
     if(seen.has(c.image)||(album&&(albumCounts.get(album)??0)>=3))return false;
     seen.add(c.image);albumCounts.set(album,(albumCounts.get(album)??0)+1);return true;
   });
-  // Download top candidates in parallel, retaining ranking order if several
-  // work. Only decoded covers are eligible; broken CDN URLs are skipped.
+  // Start the ranked downloads together, but publish as soon as the highest
+  // ranked viable cover finishes; never wait for unrelated slow downloads.
   for(let batch=0;batch<Math.min(8,unique.length);batch+=4){
-    const checked=await Promise.allSettled(unique.slice(batch,batch+4).map(async candidate=>({candidate,image:await fetchImage(candidate.image,env,Date.now()+2500)})));
-    for(const item of checked)if(item.status==="fulfilled"){
-    const {candidate,image}=item.value;
+    const checked=unique.slice(batch,batch+4).map(candidate=>download(candidate.image).then(image=>image?{candidate,image}:null));
+    for(const job of checked){const item=await job;if(!item)continue;
+    const {candidate,image}=item;
     let contentType:string,frame:Uint8Array;
     try{contentType=radioImageType(image);frame=processToRgb565(image);}catch{continue;}
+    for(const [url,request] of downloads)if(url!==candidate.image)request.controller.abort();
     const sha256=await hashBytes(frame);
     await Promise.all([
       env.FRAMES.put(`frames/${sha256}.rgb565`,frame,{httpMetadata:{contentType:"application/octet-stream"}}),
       env.FRAMES.put(`radio/cover/${sha256}`,image,{httpMetadata:{contentType}})
     ]);
     const value:RadioCover={title,artists,album:candidate.album,sha256,track_key:track.key,cover_url:`/v1/radio/cover/${sha256}`,
-      source:candidate.source,score:candidate.score};
-    // A cache error must not prevent a verified cover from being displayed.
-    try{await env.KV.put(key,JSON.stringify(value),{expirationTtl:2592000});}catch{}
+      source:candidate.source,score:candidate.score,policy:RADIO_POLICY,release_quality:radioReleaseQuality(candidate,candidates),album_date:candidate.albumDate};
     return value;
     }
   }

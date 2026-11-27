@@ -121,7 +121,9 @@ function artistScore(expected: string, actual: unknown): number {
 }
 
 export function radioMatchScore(title: string, artists: string[], track: unknown, artist: unknown): number {
-  const ts=nameScore(title,track), as=Math.max(0,...artists.map(a=>artistScore(a,artist)));
+  const ts=nameScore(title,track), scores=artists.map(a=>artistScore(a,artist));
+  // A duet credited to both Kan artists is stronger evidence than one name.
+  const as=scores.length>1&&scores.every(s=>s>=92)?100:Math.max(0,...scores);
   // Broaden spelling and bilingual matches, but require strong independent
   // evidence on both fields and at least one near-exact field.
   return ts>=80 && as>=80 && Math.max(ts,as)>=90 ? ts+as : 0;
@@ -146,14 +148,44 @@ export function canPublishRadio(track:RadioTrack,current:RadioTrack|null,now:num
 }
 
 export function radioCompilation(album: string): boolean {
-  return /best of|all the best|\bgreatest\b|hits and history|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
+  return /best of|all the best|\bgreatest\b|\bhits\b|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|\bnumber\s*1['’]?s\b|\bmotown\s+25\b|\bat the close of a century\b|\boriginal musiquarium\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
 }
 
-export function rankRadioReleases<T extends {album:string; score:number; compilation:boolean; single:boolean; date:string}>(candidates:T[]):T[] {
-  const live=(s:string)=>/\b(?:live at|live in|live from|live album|in concert)\b|\(live\)|הופעה חיה/i.test(s);
-  const soundtrack=(s:string)=>/\bsoundtrack\b|פסקול/i.test(s);
+export interface RadioReleaseEvidence {album:string;score:number;compilation:boolean;single:boolean;date:string;albumDate?:string;source?:string;order?:number;}
+const live=(s:string)=>/\b(?:live at|live in|live from|live album|in concert)\b|\(live\)|הופעה חיה/i.test(s);
+const soundtrack=(s:string)=>/\bsoundtrack\b|פסקול/i.test(s);
+const provider=(s:string='')=>s.startsWith('Apple Music')?'apple':s==='Deezer'?'deezer':s==='MusicBrainz'?'musicbrainz':s;
+const year=(s:string='')=>/^\d{4}/.test(s)?Number(s.slice(0,4)):9999;
+export function radioAlbumKey(s:string):string{
+  return radioNormalize(s.replace(/\s*[\[(][^\])]*(?:remaster|deluxe|expanded|anniversary|special edition|מהדורה מיוחדת)[^\])]*[\])]/gi,'').replace(/\s+[-–—]\s+(?:deluxe|expanded|special edition|מהדורה מיוחדת).*$/i,''));
+}
+
+export function rankRadioReleases<T extends RadioReleaseEvidence>(candidates:T[]):T[] {
   const confidence=(s:number)=>s>=190?2:s>=180?1:0;
+  const firstYear=Math.min(9999,...candidates.filter(c=>c.score>=180).map(c=>year(c.date)));
+  const groups=new Map<string,{providers:Set<string>;year:number;compilation:boolean}>();
+  for(const c of candidates){
+    const key=radioAlbumKey(c.album),g=groups.get(key)??{providers:new Set(),year:9999,compilation:false};
+    if(c.source)g.providers.add(provider(c.source));
+    g.year=Math.min(g.year,year(c.albumDate));g.compilation ||= c.compilation;groups.set(key,g);
+  }
+  const evidence=(c:T)=>groups.get(radioAlbumKey(c.album))!;
+  const datePenalty=(c:T)=>{const y=evidence(c).year;return y===9999?1:firstYear!==9999&&y>firstYear+2?2:0;};
+  const preference=(c:T)=>provider(c.source)==='apple'?0:provider(c.source)==='deezer'?1:2;
   return candidates.sort((a,b)=>confidence(b.score)-confidence(a.score)||
-    Number(a.compilation)-Number(b.compilation)||Number(live(a.album))-Number(live(b.album))||
-    Number(soundtrack(a.album))-Number(soundtrack(b.album))||Number(a.single)-Number(b.single)||b.score-a.score||(a.date||'9999').localeCompare(b.date||'9999'));
+    Number(evidence(a).compilation)-Number(evidence(b).compilation)||Number(live(a.album))-Number(live(b.album))||
+    Number(soundtrack(a.album))-Number(soundtrack(b.album))||datePenalty(a)-datePenalty(b)||
+    Number(a.single)-Number(b.single)||evidence(b).providers.size-evidence(a).providers.size||
+    b.score-a.score||evidence(a).year-evidence(b).year||(a.date||'9999').localeCompare(b.date||'9999')||
+    preference(a)-preference(b)||(a.order??999)-(b.order??999));
+}
+
+export function radioReleaseQuality(c:RadioReleaseEvidence,candidates:RadioReleaseEvidence[]):'original'|'fallback'{
+  const group=candidates.filter(r=>radioAlbumKey(r.album)===radioAlbumKey(c.album));
+  if(group.some(r=>r.compilation)||live(c.album)||soundtrack(c.album)||c.score<190)return 'fallback';
+  const firstYear=Math.min(9999,...candidates.filter(r=>r.score>=180).map(r=>year(r.date)));
+  const releaseYear=Math.min(9999,...group.map(r=>year(r.albumDate)));
+  if(firstYear!==9999&&releaseYear!==9999&&releaseYear>firstYear+2)return 'fallback';
+  const corroborated=new Set(group.map(r=>provider(r.source)).filter(Boolean)).size>=2;
+  return releaseYear!==9999||corroborated?'original':'fallback';
 }

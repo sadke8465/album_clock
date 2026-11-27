@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle,hebrewSearchVariants} from '../src/radio-match.ts';
+import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle,hebrewSearchVariants,radioReleaseQuality} from '../src/radio-match.ts';
 
 test('Kan Hebrew title matches bilingual Apple track from live feed',()=>{
   assert.equal(radioMatchScore('צחוק הגורל',['Peter Roth'],'Tzchok Hagoral (צחוק הגורל)','Peter Roth'),200);
@@ -59,4 +59,22 @@ test('Latin-only Kan titles can find their Hebrew catalogue originals',()=>{
   assert.ok(radioMatchScore(title,artists,'חוזרים הביתה','Shlomo Artzi')>=190);
   assert.ok(radioMatchScore(title,artists,'חוזרים הבית','Arik Einstein & Shlomo Artzi')>=180);
   assert.equal(radioMatchScore(title,artists,'Hozrim Habaita','ariela savir'),0);
+});
+
+test('Stevie Wonder I Wish prefers 1976 original over identical track dates on hits albums',()=>{
+  const release=(album:string,source:string,date:string,albumDate:string,order=0)=>({album,source,date,albumDate,score:200,single:false,compilation:radioCompilation(album),order});
+  const a=[release('Motown 25: Yesterday, Today, Forever','MusicBrainz','1976','1983'),
+    release('Original Musiquarium','Apple Music US','1976','1982'),
+    release('The Definitive Collection','Apple Music IL','1976','2002'),
+    release('At The Close Of A Century','Apple Music IL','1976','1999'),
+    release('Songs In The Key Of Life','Deezer','',''),
+    release('Songs In The Key Of Life','Apple Music IL','1976','1976')];
+  assert.equal(rankRadioReleases(a)[0].album,'Songs In The Key Of Life');
+  assert.equal(a[0].source,'Apple Music IL');
+  assert.equal(radioReleaseQuality(a[0],a),'original');
+  assert.equal(radioReleaseQuality(a.find(x=>x.album.startsWith('Motown'))!,a),'fallback');
+  const unknown=[release('Later unnamed compilation','Apple Music US','1976','2002'),release('Original studio album','Apple Music IL','1976','1976')];
+  unknown[0].compilation=false;
+  assert.equal(rankRadioReleases(unknown)[0].album,'Original studio album');
+  assert.equal(radioReleaseQuality(unknown[1],unknown),'fallback');
 });
