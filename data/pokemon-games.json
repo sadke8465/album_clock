@@ -1,0 +1,18 @@
+[
+  {"id":1,"name":"Red & Blue","path":"generation-i/red-blue","max":151,"animated":"","static":"png","transparent":true,"shiny":false,"backAnimated":false,"female":false},
+  {"id":2,"name":"Yellow","path":"generation-i/yellow","max":151,"animated":"","static":"png","transparent":true,"shiny":false,"backAnimated":false,"female":false},
+  {"id":3,"name":"Gold","path":"generation-ii/gold","max":251,"animated":"","static":"png","transparent":true,"shiny":true,"backAnimated":false,"female":false},
+  {"id":4,"name":"Silver","path":"generation-ii/silver","max":251,"animated":"","static":"png","transparent":true,"shiny":true,"backAnimated":false,"female":false},
+  {"id":5,"name":"Crystal","path":"generation-ii/crystal","max":251,"animated":"gif","static":"png","transparent":true,"shiny":true,"backAnimated":false,"female":false},
+  {"id":6,"name":"Ruby & Sapphire","path":"generation-iii/ruby-sapphire","max":386,"animated":"","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":false},
+  {"id":7,"name":"Emerald","path":"generation-iii/emerald","max":386,"animated":"png","static":"png","transparent":false,"shiny":true,"backAnimated":true,"female":false},
+  {"id":8,"name":"FireRed & LeafGreen","path":"generation-iii/firered-leafgreen","max":386,"animated":"","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":false},
+  {"id":9,"name":"Diamond & Pearl","path":"generation-iv/diamond-pearl","max":493,"animated":"png","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":true},
+  {"id":10,"name":"Platinum","path":"generation-iv/platinum","max":493,"animated":"png","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":true},
+  {"id":11,"name":"HeartGold & SoulSilver","path":"generation-iv/heartgold-soulsilver","max":493,"animated":"png","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":true},
+  {"id":12,"name":"Black & White","path":"generation-v/black-white","max":649,"animated":"gif","static":"png","transparent":false,"shiny":true,"backAnimated":true,"female":true},
+  {"id":13,"name":"X & Y","path":"generation-vi/x-y","max":721,"animated":"","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":true},
+  {"id":14,"name":"Omega Ruby & Alpha Sapphire","path":"generation-vi/omega-ruby-alpha-sapphire","max":721,"animated":"","static":"png","transparent":false,"shiny":true,"backAnimated":false,"female":true},
+  {"id":15,"name":"Ultra Sun & Ultra Moon","path":"generation-vii/ultra-sun-ultra-moon","max":807,"animated":"gif","static":"","animatedAtRoot":true,"transparent":false,"shiny":true,"backAnimated":true,"female":true},
+  {"id":16,"name":"Let's Go Pikachu & Eevee","path":"generation-vii/lets-go-pikachu-lets-go-eevee","max":151,"extra":[808,809],"animated":"gif","static":"","animatedAtRoot":true,"transparent":false,"shiny":true,"backAnimated":true,"female":true}
+]

@@ -72,6 +72,15 @@ test("generatedFallbackFrame is a valid frame", () => {
   assert.equal(generatedFallbackFrame(0).length, FRAME_BYTES);
 });
 
+test("RGB565 detail is full 512px and keeps channel ordering", () => {
+  const rgba = new Uint8Array(512 * 512 * 4);
+  rgba[rgba.length - 3] = 255;
+  const out = rgbaToRgb565(rgba, 1, 1);
+  assert.equal(out.length, 512 * 512 * 2);
+  assert.equal(out[out.length - 2], 0xe0);
+  assert.equal(out[out.length - 1], 0x07);
+});
+
 test("pickLastfmImage skips the placeholder cover", () => {
   const images = [
     { size: "small", "#text": "http://x/2a96cbd8b46e442fc41c2b86b821562f.png" },

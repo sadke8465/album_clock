@@ -82,6 +82,7 @@ def source_fingerprint(row: Dict[str, str]) -> str:
     fields = [PROCESSING_VERSION]
     fields.extend(
         f"{key}={normalized(value)}" for key, value in sorted(row.items())
+        if key != "image_url" or value
     )
     return digest_text(*fields)
 

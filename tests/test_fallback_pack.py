@@ -25,6 +25,15 @@ def entry(index: int) -> pack.CatalogEntry:
 
 
 class FallbackPackTests(unittest.TestCase):
+    def test_expanded_catalog_uses_exact_apple_urls(self):
+        catalog = pack.load_catalog(Path(__file__).resolve().parents[1] / "data/albums.csv")
+        self.assertEqual(len(catalog), 290)
+        direct = [entry.candidate for entry in catalog if entry.candidate.image_url]
+        self.assertEqual(len(direct), 79)
+        for candidate in direct:
+            self.assertTrue(candidate.image_url.startswith("https://is"))
+            self.assertIn(".mzstatic.com/image/", candidate.image_url)
+            self.assertEqual(generator.resolve_artwork_url(candidate, {})[0], candidate.image_url)
     def test_round_trip_and_frame_boundaries(self):
         entries = [entry(0), entry(1)]
         frames = {

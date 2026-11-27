@@ -11,11 +11,23 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
+#include <esp_attr.h>
 #include <mbedtls/sha256.h>
 
 #include "AlbumClockConfig.h"
 #include "AudioReactive.h"
+#include "AudioPulse.h"
 #include "PortalPage.h"
+#include "ImageAdjustments.h"
+#include "AmbientEffects.h"
+#include "OtaUpdate.h"
+#include "FaceZoom.h"
+#include "SmartRegions.h"
+#include "ZoomSourcePolicy.h"
+#include "PokemonMode.h"
+#include "human_face_detect_msr01.hpp"
+#include "WiimSource.h"
 
 #if __has_include("LocalSecrets.h")
 #include "LocalSecrets.h"
@@ -34,6 +46,51 @@ static uint8_t staging[FRAME_BYTES];                // atomic download buffer
 static uint16_t transitionFrom[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t transitionTo[FRAME_WIDTH * FRAME_HEIGHT];
 static uint16_t compositeFrame[FRAME_WIDTH * FRAME_HEIGHT];
+static uint16_t adjustedFrame[FRAME_WIDTH * FRAME_HEIGHT], adjustmentScratch[FRAME_WIDTH * FRAME_HEIGHT];
+static ImageAdjustments imageSettings;
+static AmbientSettings ambientSettings;
+static uint16_t *ambientBase=nullptr,*ambientOutput=nullptr;
+static bool ambientRendered=false,ambientBaseValid=false;
+static uint32_t ambientLastDraw=0;
+#define AMBIENT_FIELDS(X) X(mode,0,7) X(target,0,6) X(intensity,0,100) X(density,1,48) X(speed,10,200) X(size,1,3) X(threshold,0,245) X(softness,0,100) X(palette,0,4) X(direction,0,3) X(blend,0,3) X(fps,5,25) X(chroma,0,100) X(micgain,10,250) X(micgate,0,100) X(micattack,10,200) X(micrelease,50,1200)
+static bool faceEnabled=false, quadrantEnabled=false, faceBaseValid=false, facePending=false, faceDetailed=false;
+static uint16_t faceBase[4096];
+static uint16_t *faceSource=nullptr;
+static int faceWidth=64;
+static bool faceRecovery=false, faceReady=false,faceLiveMusic=false,faceRadioArtwork=false,faceRandomArtwork=false;
+static uint64_t faceFingerprint=0,faceLastEmpty=0;
+static uint32_t facePendingAt=0;
+static String faceDetailPath;
+static bool faceDetailRequested=false,faceDetailWaiting=false;
+static uint8_t faceDetailAttempts=0;
+static uint32_t faceDetailRetryAt=0;
+static uint32_t faceDetailStartedAt=0,faceScanRetryAt=0;
+static uint8_t faceScanAttempts=0;
+RTC_NOINIT_ATTR static uint32_t faceInferenceMarker;
+static constexpr uint32_t FACE_BUSY_MAGIC=0xface3410;
+static uint32_t faceArtworkId=0, faceChangedAt=0;
+static uint32_t faceTriedId=0;
+static int faceIndex=-1, faceCount=0, quadrantIndex=-1,textIndex=-1;
+static bool textEnabled=true, saliencyEnabled=true,regionsReady=false;
+static SmartRegions smartRegions;
+static uint8_t faceSensitivity=60,zoomDepth=100,zoomHold=18,zoomDelay=30;
+static bool zoomAnimating=false;
+static uint32_t zoomStarted=0,zoomLastDraw=0;
+static uint16_t zoomDuration=3000;
+static MotionCrop currentCrop{0,0,FACE_SOURCE_SIZE},zoomFrom{0,0,FACE_SOURCE_SIZE},zoomTo{0,0,FACE_SOURCE_SIZE};
+static uint8_t zoomFps=30,zoomSmoothness=100,activeZoomSmoothness=100;
+static uint16_t activeZoomDuration=3000;
+static uint32_t zoomRenderMs=0;
+static FaceCrop faceCrops[FACE_MAX];
+struct FaceJob { uint32_t id; uint16_t *pixels; int width; uint64_t fingerprint; uint8_t sensitivity; };
+struct FaceResult { uint32_t id; int count; FaceCrop crops[FACE_MAX]; uint64_t fingerprint; bool ran; };
+struct FaceCacheEntry { uint64_t fingerprint; int count; FaceCrop crops[FACE_MAX]; };
+static FaceCacheEntry faceCache[12]{};
+static uint8_t faceCacheCursor=0;
+struct DetailJob { uint32_t id; char path[128]; };
+static QueueHandle_t detailJobs=nullptr;
+static QueueHandle_t faceJobs=nullptr, faceResults=nullptr;
+#define IMAGE_FIELDS(X) X(contrast,0,200) X(saturation,0,200) X(exposure,-100,100) X(warmth,-100,100) X(tint,-100,100) X(hue,-180,180) X(gamma,50,200) X(blur,0,4) X(red,50,150) X(green,50,150) X(blue,50,150) X(blackpoint,0,48) X(whitepoint,207,255) X(blackcut,0,32) X(whitecut,0,32) X(shadows,0,100) X(highlights,0,100)
 
 static String wifiSsid;
 static String wifiPass;
@@ -60,9 +117,14 @@ static bool gammaOn = DEFAULT_FADE_GAMMA;
 static uint8_t fieldOld[FRAME_WIDTH * FRAME_HEIGHT];
 static uint8_t fieldNew[FRAME_WIDTH * FRAME_HEIGHT];
 static float gammaLUT[256];
-static uint8_t displayMode = 0;  // 0 = album art, 1 = audio reactive
+static volatile uint8_t displayMode = 0;  // 0 = album art, 1 = audio reactive, 2 = Pokémon
+static PokemonMode pokemon;
 static bool audioReady = false;
 static bool audioFailed = false;
+static AudioPulse albumPulse;
+static bool albumMicActive=false;
+static int albumAudioLevel=-1;
+static uint32_t albumMicPollAt=0,albumMicSampleAt=0;
 static bool apMode = false;
 static bool serverStarted = false;
 static bool hasFrame = false;
@@ -75,7 +137,7 @@ extern const uint8_t rootca_crt_bundle_start[]
 
 enum class NetworkCommandType : uint8_t { Refresh };
 struct NetworkCommand { NetworkCommandType type; };
-enum class NetworkEventType : uint8_t { State, Frame, Pack, Error };
+enum class NetworkEventType : uint8_t { State, Frame, Pack, Error, Detail };
 struct NetworkEvent {
   NetworkEventType type;
   uint32_t generation;
@@ -83,6 +145,8 @@ struct NetworkEvent {
   uint32_t latencyMs;
   uint8_t *data;
   char message[96];
+  uint16_t *detail;
+  char detailPath[128];
 };
 
 struct RemoteSnapshot {
@@ -120,6 +184,8 @@ struct TransitionState {
   uint32_t generation = 0;
   uint32_t startedAt = 0;
   uint32_t lastDrawAt = 0;
+  uint16_t durationMs = DEFAULT_TRANSITION_MS;
+  uint16_t holdMs = DEFAULT_FADE_HOLD_MS;
 };
 
 static RemoteSnapshot remoteState;
@@ -179,23 +245,62 @@ void drawTestCard() {
   }
 }
 
+static bool imageNeutral() {
+  const ImageAdjustments defaults;
+  bool neutral = true;
+#define CHECK_IMAGE(name,lo,hi) neutral = neutral && imageSettings.name == defaults.name;
+  IMAGE_FIELDS(CHECK_IMAGE)
+#undef CHECK_IMAGE
+  return neutral;
+}
+static const uint16_t *adjustedArtwork(const uint16_t *source) {
+  if (imageNeutral()) return source;
+  imageRender(source,adjustedFrame,adjustmentScratch,imageSettings);
+  return adjustedFrame;
+}
+
+static void rememberAmbientBase(const uint16_t *art) {
+  ambientRendered=false;
+  if(!ambientSettings.mode){ambientBaseValid=false;return;}
+  if(!ambientBase)ambientBase=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!ambientOutput)ambientOutput=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  ambientBaseValid=ambientBase&&ambientOutput;
+  if(ambientBaseValid)memcpy(ambientBase,art,FRAME_BYTES);
+}
+
+static void draw565(int x, int y, uint16_t value);
+
+// Ambient is a final compositing pass, not a separate display mode. All
+// artwork frames (zoom, transition, or still) share the same wall-clock phase.
+static void presentAmbientBase(uint32_t now) {
+  int level=albumMicActive&&now-albumMicSampleAt<=250?albumAudioLevel:-1;
+  ambientRender(ambientBase,ambientOutput,ambientSettings,now,level);
+  ambientLastDraw=now;
+  ambientRendered=true;
+  for(int y=0;y<FRAME_HEIGHT;y++)for(int x=0;x<FRAME_WIDTH;x++)
+    draw565(x,y,ambientOutput[y*FRAME_WIDTH+x]);
+}
+
+static void presentArtwork(const uint16_t *source) {
+  const uint16_t *art=adjustedArtwork(source);
+  rememberAmbientBase(art);
+  if(ambientBaseValid&&displayMode==0&&!otaInstalling()) {
+    presentAmbientBase(millis());
+    return;
+  }
+  for(int y=0;y<FRAME_HEIGHT;y++)for(int x=0;x<FRAME_WIDTH;x++)
+    draw565(x,y,art[y*FRAME_WIDTH+x]);
+}
+
 void drawFrame() {
-  if (!display) return;
+  if (!display||displayMode==2) return;
   if (testCard) {
+    ambientRendered=false;
+    ambientBaseValid=false;
     drawTestCard();
     return;
   }
-  for (int y = 0; y < FRAME_HEIGHT; y++) {
-    for (int x = 0; x < FRAME_WIDTH; x++) {
-      uint16_t v = frame[y * FRAME_WIDTH + x];
-      uint8_t r5 = (v >> 11) & 0x1F, g6 = (v >> 5) & 0x3F, b5 = v & 0x1F;
-      // Expand to 8-bit per channel.
-      uint8_t r = (r5 << 3) | (r5 >> 2);
-      uint8_t g = (g6 << 2) | (g6 >> 4);
-      uint8_t b = (b5 << 3) | (b5 >> 2);
-      drawTrue(x, y, r, g, b);
-    }
-  }
+  presentArtwork(transition.active?compositeFrame:frame);
 }
 
 void showBootPattern() {
@@ -319,12 +424,6 @@ void drawBlend(int x, int y, uint16_t vo, uint16_t vn, float ow, float nw) {
   drawTrue(x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b);
 }
 
-void drawFinal(const uint16_t *buf) {
-  for (int y = 0; y < FRAME_HEIGHT; y++)
-    for (int x = 0; x < FRAME_WIDTH; x++)
-      drawScaled(x, y, buf[y * FRAME_WIDTH + x], 1.0f);
-}
-
 static uint16_t scaled565(uint16_t value, float amount) {
   amount = amount < 0 ? 0 : (amount > 1 ? 1 : amount);
   uint8_t r5 = (value >> 11) & 0x1F, g6 = (value >> 5) & 0x3F, b5 = value & 0x1F;
@@ -351,9 +450,18 @@ static void draw565(int x, int y, uint16_t value) {
   drawTrue(x, y, (r5 << 3) | (r5 >> 2), (g6 << 2) | (g6 >> 4), (b5 << 3) | (b5 >> 2));
 }
 
+static void serviceAmbient() {
+  // Motion frames already contain ambient; only repaint stationary artwork
+  // here, at the configured ambient FPS, to avoid redundant panel passes.
+  if(!ambientSettings.mode||!ambientBaseValid||!hasFrame||!display||testCard||displayMode!=0||transition.active||zoomAnimating||otaInstalling())return;
+  uint32_t now=millis();
+  if(now-ambientLastDraw<(uint32_t)(1000/ambientSettings.fps))return;
+  presentAmbientBase(now);
+}
+
 bool beginNextFallback(bool manual);
 
-void startTransition(const uint16_t *target, uint32_t generation) {
+void startTransition(const uint16_t *target, uint32_t generation,bool radio=false) {
   if (!display || !target) return;
   if (transition.active && memcmp(transitionTo, target, FRAME_BYTES) == 0) return;
   if (!transition.active && hasFrame && memcmp(frame, target, FRAME_BYTES) == 0) return;
@@ -368,6 +476,10 @@ void startTransition(const uint16_t *target, uint32_t generation) {
   transition.generation = generation;
   transition.startedAt = millis();
   transition.lastDrawAt = 0;
+  // A live song change should not spend several seconds on the old cover.
+  // Keep the selected visual method, but cap the duration for radio only.
+  transition.durationMs=radio?min(transitionMs,(uint16_t)1200):transitionMs;
+  transition.holdMs=radio?min(holdMs,(uint16_t)100):holdMs;
   computeField(transitionFrom, fieldOld, patOut);
   computeField(transitionTo, fieldNew, patIn);
 
@@ -381,12 +493,222 @@ void startTransition(const uint16_t *target, uint32_t generation) {
   }
 }
 
+// Executed by the network task between requests. No TLS session is open, and
+// the model destructor runs before networking resumes.
+static void runFaceDetection(FaceJob job, bool radio) {
+    FaceResult result{};result.id=job.id;result.fingerprint=job.fingerprint;
+    size_t before=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    size_t largest=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    Serial.printf("Face job: internal free %u, largest %u\n",(unsigned)before,(unsigned)largest);
+    // Don't starve Wi-Fi or the HTTP portal when internal heap is fragmented.
+    if(before<65000||largest<28000){
+      Serial.println("Face job skipped: insufficient internal heap");
+      free(job.pixels);xQueueOverwrite(faceResults,&result);return;
+    }
+    uint8_t *rgb=(uint8_t *)heap_caps_malloc(FACE_DETECT_SIZE*FACE_DETECT_SIZE*3,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(rgb) {
+      uint32_t started=millis();FaceRect boxes[FACE_MAX]{};
+      Serial.printf("Tiled face detection: %dpx, sensitivity %u\n",FACE_DETECT_SIZE,job.sensitivity);
+      faceInferenceMarker=FACE_BUSY_MAGIC;
+      {
+        HumanFaceDetectMSR01 detector(0.35F-job.sensitivity*0.0025F,0.5F,FACE_MAX,0.75F);
+        for(int pass=0;pass<(radio?3:6)&&result.count<FACE_MAX;pass++){
+          if(pass&&(millis()-started>(radio?2200UL:6000UL)||!faceEnabled||job.id!=faceArtworkId||
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)<30000))break;
+          FaceCrop tile=faceScanTile(pass);uint32_t total=0;
+          for(int y=0;y<FACE_DETECT_SIZE;y++){
+            for(int x=0;x<FACE_DETECT_SIZE;x++){
+              int i=y*FACE_DETECT_SIZE+x;
+              float scale=job.width/(float)FACE_SOURCE_SIZE;
+              uint16_t v=faceSample(job.pixels,job.width,job.width,(tile.x+(x+.5f)*tile.side/FACE_DETECT_SIZE)*scale-.5f,
+                (tile.y+(y+.5f)*tile.side/FACE_DETECT_SIZE)*scale-.5f);
+              faceRgb888(v,rgb+i*3);total+=(rgb[i*3]+rgb[i*3+1]*2+rgb[i*3+2])/4;
+            }
+            if(y%16==0)vTaskDelay(1);
+          }
+          int mean=total/(FACE_DETECT_SIZE*FACE_DETECT_SIZE);
+          if(mean<75){int gain=100+min(55,75-mean);for(int i=0;i<FACE_DETECT_SIZE*FACE_DETECT_SIZE*3;i++)rgb[i]=min(255,rgb[i]*gain/100);}
+          auto &faces=detector.infer(rgb,{FACE_DETECT_SIZE,FACE_DETECT_SIZE,3});
+          result.ran=true;
+          Serial.printf("Face tile %d: raw boxes %u\n",pass,(unsigned)faces.size());
+          for(const auto &f:faces) {
+            if(f.box.size()<4||result.count>=FACE_MAX||f.box[2]<=f.box[0]||f.box[3]<=f.box[1])continue;
+            FaceRect box=mapFaceRect({f.box[0],f.box[1],f.box[2],f.box[3]},tile,FACE_DETECT_SIZE);
+            bool duplicate=false;for(int i=0;i<result.count;i++)if(sameFace(box,boxes[i])){duplicate=true;break;}
+            if(!duplicate){boxes[result.count]=box;result.crops[result.count++]=faceCrop(box);}
+          }
+          vTaskDelay(1);
+        }
+      }
+      faceInferenceMarker=0;
+      free(rgb);
+      Serial.printf("Face detection: %d result(s), model freed, internal heap %u\n",result.count,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT));
+    }
+    free(job.pixels);
+    xQueueOverwrite(faceResults,&result);
+    vTaskDelay(1);
+}
+static void requestFaceDetection() {
+  if(displayMode==2)return;
+  if(!faceReady||!faceEnabled||!faceArtworkEligible(faceLiveMusic,faceRandomArtwork)||
+     (faceRandomArtwork&&playbackActive)||!faceSource||faceWidth<128||!faceJobs||!faceResults||facePending||
+     faceTriedId==faceArtworkId||faceScanAttempts>=3||
+     (faceScanRetryAt&&(int32_t)(millis()-faceScanRetryAt)<0))return;
+  faceTriedId=faceArtworkId;
+  uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
+  for(const auto &cached:faceCache)if(cached.fingerprint==fingerprint&&cached.count>0&&cached.count<=FACE_MAX){
+    faceCount=cached.count;memcpy(faceCrops,cached.crops,sizeof(faceCrops));
+    Serial.println("Face locations restored from album cache");return;
+  }
+  if(faceLastEmpty==fingerprint)return;
+  uint16_t *copy=(uint16_t *)heap_caps_malloc(faceWidth*faceWidth*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!copy){faceTriedId=0;faceScanRetryAt=millis()+3000;++faceScanAttempts;return;}
+  memcpy(copy,faceSource,faceWidth*faceWidth*2);
+  FaceJob old;
+  if(xQueueReceive(faceJobs,&old,0)==pdTRUE)free(old.pixels);
+  FaceJob job{faceArtworkId,copy,faceWidth,fingerprint,faceSensitivity};
+  if(xQueueSend(faceJobs,&job,0)==pdTRUE){facePending=true;facePendingAt=millis();++faceScanAttempts;}
+  else {free(copy);faceTriedId=0;faceScanRetryAt=millis()+3000;++faceScanAttempts;}
+}
+static void serviceFaceJob(bool musicAllowed,bool idleAllowed,bool radio=false) {
+  FaceJob job;
+  if(!faceJobs||xQueueReceive(faceJobs,&job,0)!=pdTRUE)return;
+  if(faceEnabled&&faceScanAllowed(faceLiveMusic,faceRandomArtwork,musicAllowed,idleAllowed)&&job.id==faceArtworkId)
+    runFaceDetection(job,radio||faceRandomArtwork); // bounded scan; yield to the next WiiM poll
+  else {free(job.pixels);FaceResult result{};result.id=job.id;xQueueOverwrite(faceResults,&result);}
+}
+static void requestArtworkDetail(){
+  if(displayMode==2)return;
+  if(!detailJobs||faceDetailed||faceDetailRequested||faceDetailAttempts>=3||
+     (faceDetailRetryAt&&(int32_t)(millis()-faceDetailRetryAt)<0)||!faceDetailPath.length()||
+     (!quadrantEnabled&&!textEnabled&&!(faceEnabled&&faceArtworkEligible(faceLiveMusic,faceRandomArtwork))))return;
+  DetailJob job{};job.id=faceArtworkId;strlcpy(job.path,faceDetailPath.c_str(),sizeof(job.path));
+  xQueueOverwrite(detailJobs,&job);faceDetailRequested=true;faceDetailWaiting=true;faceDetailStartedAt=millis();++faceDetailAttempts;
+}
+static void setFaceArtwork(const uint16_t *source,uint16_t *detail=nullptr,const String &path="",bool liveMusic=false,bool radio=false,bool random=false) {
+  ++faceArtworkId;faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceCount=0;facePending=false;faceChangedAt=millis();
+  smartRegions=SmartRegions{};regionsReady=false;
+  zoomAnimating=false;currentCrop={0,0,FACE_SOURCE_SIZE};
+  memcpy(faceBase,source,FRAME_BYTES);faceBaseValid=true;
+  faceLiveMusic=liveMusic;faceRadioArtwork=radio;faceRandomArtwork=random;
+  faceScanAttempts=0;faceScanRetryAt=0;
+  faceFingerprint=14695981039346656037ULL;
+  for(int i=0;i<4096;i++){faceFingerprint^=source[i];faceFingerprint*=1099511628211ULL;}
+  if(faceSource)free(faceSource);
+  faceSource=detail;faceDetailed=detail!=nullptr;
+  faceWidth=detail?FACE_DETAIL_SIZE:64;
+  faceDetailPath=path;faceDetailRequested=false;faceDetailWaiting=false;faceDetailAttempts=0;faceDetailRetryAt=0;
+  if(!faceSource) {
+    faceSource=(uint16_t *)heap_caps_malloc(FRAME_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(faceSource)memcpy(faceSource,source,FRAME_BYTES);
+  }
+  requestArtworkDetail();
+}
+static void startCropZoom(FaceCrop target) {
+  zoomFrom=currentCrop;zoomTo=motionCrop(target);zoomStarted=millis();zoomLastDraw=0;zoomAnimating=true;
+  activeZoomDuration=zoomDuration;activeZoomSmoothness=zoomSmoothness;
+}
+static void serviceCropZoom() {
+  if(!zoomAnimating||!faceSource||transition.active||displayMode!=0||testCard)return;
+  uint32_t now=millis();
+  if(zoomLastDraw&&now-zoomLastDraw<1000UL/zoomFps)return;
+  zoomLastDraw=now;
+  float t=(now-zoomStarted)/(float)activeZoomDuration;
+  currentCrop=interpolateMotion(zoomFrom,zoomTo,t,activeZoomSmoothness);
+  faceResizeMotion(faceSource,faceWidth,frame,64,currentCrop,faceBase);
+  memcpy(compositeFrame,frame,FRAME_BYTES);
+  drawFrame();
+  zoomRenderMs=millis()-now;
+  if(t>=1) {
+    zoomAnimating=false;displayGeneration=++nextDisplayGeneration;faceChangedAt=now;
+  }
+}
+static void returnFullCover() {
+  faceIndex=-1;quadrantIndex=-1;textIndex=-1;faceChangedAt=millis();
+  if(faceBaseValid&&faceSource)startCropZoom({0,0,FACE_SOURCE_SIZE});
+}
+static bool advanceFace() {
+  if(!faceEnabled||!faceArtworkEligible(faceLiveMusic,faceRandomArtwork)||!faceBaseValid||!faceSource||!faceCount||transition.active||displayMode!=0||testCard)return false;
+  quadrantIndex=-1;textIndex=-1;
+  ++faceIndex;
+  if(faceIndex>=faceCount)faceIndex=-1;
+  startCropZoom(faceIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(faceCrops[faceIndex],zoomDepth));
+  faceChangedAt=millis();
+  return true;
+}
+static bool advanceQuadrant() {
+  if(!quadrantEnabled||!faceBaseValid||!faceSource||transition.active||displayMode!=0||testCard)return false;
+  faceIndex=-1;textIndex=-1;
+  ++quadrantIndex;
+  if(quadrantIndex>=4)quadrantIndex=-1;
+  startCropZoom(quadrantIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(quadrantCrop(saliencyEnabled?smartRegions.detailOrder[quadrantIndex]:quadrantIndex),zoomDepth));
+  faceChangedAt=millis();
+  return true;
+}
+static void analyzeCurrentRegions() {
+  if(regionsReady||!faceSource||faceDetailWaiting||(!textEnabled&&!saliencyEnabled))return;
+  int n=min(faceWidth,128);
+  uint8_t *gray=(uint8_t *)heap_caps_malloc(n*n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!gray)return;
+  regionsReady=true;
+  for(int y=0;y<n;y++)for(int x=0;x<n;x++){
+    uint16_t v=faceSource[(y*faceWidth/n)*faceWidth+x*faceWidth/n];
+    gray[y*n+x]=(imageR(v)*77+imageG(v)*150+imageB(v)*29)>>8;
+  }
+  smartRegions=analyzeSmartRegions(gray,n);free(gray);
+  Serial.printf("Smart regions: %d candidate text bands\n",smartRegions.textCount);
+}
+static bool advanceText(){
+  if(!textEnabled||!faceBaseValid||!faceSource||!smartRegions.textCount||transition.active||displayMode!=0||testCard)return false;
+  faceIndex=-1;quadrantIndex=-1;
+  if(++textIndex>=smartRegions.textCount)textIndex=-1;
+  startCropZoom(textIndex<0?FaceCrop{0,0,FACE_SOURCE_SIZE}:zoomDepthCrop(smartRegions.text[textIndex],zoomDepth));
+  faceChangedAt=millis();return true;
+}
+static void serviceFaces() {
+  // A queued detail request must not indefinitely block local fallback zoom.
+  if(faceDetailWaiting&&millis()-faceDetailStartedAt>15000){faceDetailWaiting=false;}
+  if(facePending&&millis()-facePendingAt>20000){
+    facePending=false;
+    if(faceInferenceMarker==FACE_BUSY_MAGIC){
+      faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
+      Serial.println("Face detector timed out, disabled for stability");
+    }else{faceTriedId=0;faceScanRetryAt=millis()+3000;}
+  }
+  if(faceResults) {
+    FaceResult result;
+    if(xQueueReceive(faceResults,&result,0)==pdTRUE && result.id==faceArtworkId) {
+      facePending=false;faceCount=result.count;
+      memcpy(faceCrops,result.crops,sizeof(faceCrops));faceChangedAt=millis();
+      if(result.ran&&result.count>0){
+        auto &slot=faceCache[faceCacheCursor++%12];
+        slot.fingerprint=result.fingerprint;slot.count=result.count;
+        memcpy(slot.crops,result.crops,sizeof(slot.crops));
+        prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
+      }else if(result.ran)faceLastEmpty=result.fingerprint;
+      else if(faceScanAttempts<3){faceTriedId=0;faceScanRetryAt=millis()+3000;}
+    }
+  }
+  if(hasFrame&&!transition.active&&!zoomAnimating&&displayMode==0){requestArtworkDetail();analyzeCurrentRegions();requestFaceDetection();}
+  serviceCropZoom();
+  if(!zoomAnimating&&millis()-faceChangedAt>=((faceIndex<0&&quadrantIndex<0&&textIndex<0)?zoomDelay*1000UL:zoomHold*1000UL)) {
+    switch(chooseSmartZoom(faceEnabled,faceCount,facePending,textEnabled,smartRegions.textCount,
+      quadrantEnabled,faceDetailWaiting,textIndex,quadrantIndex)){
+      case SmartZoomChoice::Face:advanceFace();break;
+      case SmartZoomChoice::Text:advanceText();break;
+      case SmartZoomChoice::Quadrant:advanceQuadrant();break;
+      default:break;
+    }
+  }
+}
+
 void serviceTransition() {
   if (!transition.active || displayMode != 0) return;
   uint32_t now = millis();
   if (transition.lastDrawAt && now - transition.lastDrawAt < TRANSITION_FRAME_MS) return;
   transition.lastDrawAt = now;
-  float total = max(1.0f, (float)(transition.haveOld ? transitionMs : transitionMs / 2));
+  float total = max(1.0f, (float)(transition.haveOld ? transition.durationMs : transition.durationMs / 2));
   float elapsed = (float)(now - transition.startedAt);
   float progress = min(1.0f, elapsed / total);
   float spread = spreadPct / 100.0f, soft = softPct / 100.0f;
@@ -411,16 +733,15 @@ void serviceTransition() {
         float local = framp(progress, fieldOld[i] / 255.0f, spread, soft);
         value = blended565(transitionFrom[i], transitionTo[i], 1.0f - easef(easeOut, local), easef(easeIn, local));
       } else {
-        float nonHold = max(1.0f, total - (float)holdMs);
+        float nonHold = max(1.0f, total - (float)transition.holdMs);
         float outEnd = max(1.0f, (balancePct / 100.0f) * nonHold);
-        float inStart = outEnd + holdMs;
+        float inStart = outEnd + transition.holdMs;
         float inDuration = max(1.0f, total - inStart);
         if (elapsed < outEnd) value = scaled565(transitionFrom[i], 1.0f - easef(easeOut, framp(elapsed / outEnd, fieldOld[i] / 255.0f, spread, soft)));
         else if (elapsed < inStart) value = 0;
         else value = scaled565(transitionTo[i], easef(easeIn, framp((elapsed - inStart) / inDuration, fieldNew[i] / 255.0f, spread, soft)));
       }
       compositeFrame[i] = value;
-      if (!testCard) draw565(x, y, value);
     }
   }
 
@@ -431,12 +752,12 @@ void serviceTransition() {
     hasFrame = true;
     displayGeneration = transition.generation;
     cachePending = true;
-    if (!testCard) drawFinal(frame);
+    if (!testCard) presentArtwork(frame);
     if (nextQueued && !playbackActive) {
       nextQueued = false;
       beginNextFallback(false);
     }
-  }
+  } else if (!testCard) presentArtwork(compositeFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +794,7 @@ void renderSpectrum() {
   }
 }
 
-void serviceAudio() {
+static bool ensureAudioReady(){
   if (!audioReady && !audioFailed) {
     if (audio::begin()) {
       audioReady = true;
@@ -483,7 +804,28 @@ void serviceAudio() {
       Serial.println("Audio: mic init failed (ES7210 not responding)");
     }
   }
-  if (audioReady) {
+  return audioReady;
+}
+
+static void serviceAlbumAudio(){
+  if(displayMode!=0||ambientSettings.mode!=7||!ambientSettings.intensity||testCard||otaInstalling()){
+    if(albumMicActive){albumPulse.reset();albumAudioLevel=-1;albumMicActive=false;}
+    return;
+  }
+  if(!ensureAudioReady())return;
+  uint32_t now=millis();
+  if(!albumMicActive){albumMicActive=true;albumPulse.reset();albumAudioLevel=-1;albumMicPollAt=now-16;albumMicSampleAt=now;}
+  if(now-albumMicPollAt<16)return;
+  albumMicPollAt=now;
+  float rms=0;
+  if(audio::readLevel(rms)){
+    albumMicSampleAt=now;
+    albumAudioLevel=albumPulse.update(rms,now,ambientSettings.micgain,ambientSettings.micgate,ambientSettings.micattack,ambientSettings.micrelease);
+  }else if(now-albumMicSampleAt>250){albumPulse.reset();albumAudioLevel=-1;}
+}
+
+void serviceAudio() {
+  if (ensureAudioReady()) {
     renderSpectrum();
   } else {
     // Mic unavailable: gentle idle sweep so the mode is visibly active.
@@ -534,8 +876,44 @@ void setupMatrix() {
 // ---------------------------------------------------------------------------
 void loadSettings() {
   prefs.begin("album-clock", false);
+#define LOAD_AMBIENT(name,lo,hi) ambientSettings.name=constrain(prefs.isKey("am_" #name)?prefs.getShort("am_" #name,ambientSettings.name):ambientSettings.name,lo,hi);
+  AMBIENT_FIELDS(LOAD_AMBIENT)
+#undef LOAD_AMBIENT
+  // Upgrade the original subtle preset, but respect customized effects or Off.
+  if(ambientSettings.mode==1&&ambientSettings.target==0&&ambientSettings.intensity==22&&
+     ambientSettings.density==18&&ambientSettings.speed==65&&ambientSettings.size==1&&
+     ambientSettings.threshold==88&&ambientSettings.softness==70&&ambientSettings.palette==0&&
+     ambientSettings.direction==0&&ambientSettings.blend==0&&ambientSettings.fps==15){
+    ambientSettings=AmbientSettings{};
+#define SAVE_AMBIENT(name,lo,hi) prefs.putShort("am_" #name,ambientSettings.name);
+    AMBIENT_FIELDS(SAVE_AMBIENT)
+#undef SAVE_AMBIENT
+  }
+  if(prefs.isKey("facecache3")&&prefs.getBytesLength("facecache3")==sizeof(faceCache))prefs.getBytes("facecache3",faceCache,sizeof(faceCache));
   wifiSsid = prefs.getString("ssid", "");
-  wifiPass = prefs.getString("pass", "");
+  wifiPass = prefs.isKey("pass") ? prefs.getString("pass", "") : "";
+  faceEnabled=prefs.isKey("facezoom") && prefs.getBool("facezoom",false);
+  quadrantEnabled=prefs.isKey("quadzoom") && prefs.getBool("quadzoom",false);
+  textEnabled=prefs.getBool("textzoom",true);saliencyEnabled=prefs.getBool("saliency",true);
+  faceSensitivity=constrain(prefs.getUChar("facesens",60),0,100);
+  zoomDepth=constrain(prefs.getUChar("zoomdepth",100),50,150);
+  zoomHold=constrain(prefs.getUChar("zoomhold",18),3,60);
+  zoomDelay=constrain(prefs.getUChar("zoomdelay",30),1,120);
+  zoomDuration=constrain(prefs.isKey("zoomdur")?prefs.getUShort("zoomdur",3000):3000,500,8000);
+  zoomFps=constrain(prefs.getUChar("zoomfps",30),12,30);
+  zoomSmoothness=constrain(prefs.getUChar("zoomsmooth",100),0,100);
+  // One-time migration requested for 3.3: install the recommended clean
+  // profile, then retain subsequent remote adjustments on every reboot.
+  if (!prefs.isKey("im_profile") || prefs.getUChar("im_profile",0)!=1) {
+    imageSettings=cleanImagePreset();
+#define SAVE_CLEAN(name,lo,hi) prefs.putShort("im_" #name,imageSettings.name);
+    IMAGE_FIELDS(SAVE_CLEAN)
+#undef SAVE_CLEAN
+    prefs.putUChar("im_profile",1);
+  }
+#define LOAD_IMAGE(name,lo,hi) imageSettings.name = constrain(prefs.getShort("im_" #name, imageSettings.name), lo, hi);
+  IMAGE_FIELDS(LOAD_IMAGE)
+#undef LOAD_IMAGE
   frameUrl = prefs.getString("url", DEFAULT_FRAME_URL);
   brightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
   if (brightness < 1) brightness = DEFAULT_BRIGHTNESS;
@@ -559,7 +937,7 @@ void loadSettings() {
   desatPct = constrain(prefs.getUChar("desat", DEFAULT_DESAT_PCT), 0, 100);
   gammaOn = prefs.getUChar("gamma", DEFAULT_FADE_GAMMA) != 0;
   displayMode = prefs.getUChar("mode", 0);
-  if (displayMode > 1) displayMode = 0;
+  if (displayMode > 2) displayMode = 0;
 
 #ifdef LOCAL_WIFI_SSID
   // Optional compile-time override for development (LocalSecrets.h, untracked).
@@ -594,7 +972,7 @@ void persistFrame() {
   if (fsMutex && xSemaphoreTake(fsMutex, pdMS_TO_TICKS(250)) != pdTRUE) return;
   File f = LittleFS.open(FRAME_CACHE_TEMP_PATH, "w");
   if (!f) { if (fsMutex) xSemaphoreGive(fsMutex); return; }
-  size_t written = f.write(reinterpret_cast<uint8_t *>(frame), FRAME_BYTES);
+  size_t written = f.write(reinterpret_cast<uint8_t *>(faceBaseValid?faceBase:frame), FRAME_BYTES);
   f.flush();
   f.close();
   if (written == FRAME_BYTES) {
@@ -866,17 +1244,42 @@ bool downloadFallbackPack(const RemoteSnapshot &state, PackInstallInfo &installe
 }
 
 void pushNetworkEvent(NetworkEventType type, uint32_t generation, bool playing, uint32_t latency,
-                      uint8_t *data, const String &message) {
-  NetworkEvent event{type, generation, playing, latency, data, {0}};
+                      uint8_t *data, const String &message,uint16_t *detail=nullptr,const String &detailPath="") {
+  NetworkEvent event{type, generation, playing, latency, data, {0},detail,{0}};
+  strlcpy(event.detailPath,detailPath.c_str(),sizeof(event.detailPath));
   strlcpy(event.message, message.c_str(), sizeof(event.message));
-  if (xQueueSend(networkEvents, &event, pdMS_TO_TICKS(50)) != pdTRUE && data) {
+  if (xQueueSend(networkEvents, &event, pdMS_TO_TICKS(50)) != pdTRUE) {
+    if(detail)free(detail);
+    if(!data)return;
     if (type == NetworkEventType::State) delete reinterpret_cast<RemoteSnapshot *>(data);
     else if (type == NetworkEventType::Pack) delete reinterpret_cast<PackInstallInfo *>(data);
     else free(data);
   }
 }
 
-void networkTask(void *) {
+static uint16_t *fetchArtworkDetail(const String &path,bool radio=false) {
+  constexpr size_t size=FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2;
+  HTTPClient http;WiFiClient plain;WiFiClientSecure secure;
+  if(!beginHttp(http,plain,secure,serviceOrigin+path))return nullptr;
+  const char *headers[]={"x-detail-sha256"};http.collectHeaders(headers,1);
+  http.setTimeout(radio?3000:5000);http.setConnectTimeout(radio?1800:3000);
+  int code=http.GET();String hash=http.header("x-detail-sha256");
+  if(code!=200||http.getSize()!=(int)size||hash.length()!=64){http.end();return nullptr;}
+  uint8_t *data=(uint8_t *)heap_caps_malloc(size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+  if(!data){http.end();return nullptr;}
+  auto stream=http.getStreamPtr();size_t n=0;uint32_t start=millis();
+  while(n<size&&millis()-start<(radio?3000UL:8000UL)){
+    int available=stream->available();
+    if(available>0){int got=stream->read(data+n,min((size_t)available,size-n));if(got>0)n+=got;}
+    else if(!http.connected())break;
+    else vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  http.end();
+  if(n!=size||sha256Hex(data,size)!=hash){free(data);return nullptr;}
+  return reinterpret_cast<uint16_t *>(data);
+}
+
+void legacyNetworkTask(void *) {
   uint32_t lastPollAt = 0, lastLegacyAt = 0, fetchedGeneration = 0;
   String etag, knownPack = localPack.version;
   for (;;) {
@@ -962,6 +1365,146 @@ void networkTask(void *) {
       } else { delete info; if (error.length()) pushNetworkEvent(NetworkEventType::Error, 0, parsed.playing, millis() - requestStarted, nullptr, error); }
     }
     networkBusy = false;
+  }
+}
+
+static bool readServiceJson(const String &path, String &json,uint16_t timeout=12000) {
+  HTTPClient http; WiFiClient plain; WiFiClientSecure secure;
+  if (!beginHttp(http, plain, secure, serviceOrigin + path)) return false;
+  http.setTimeout(timeout);http.setConnectTimeout(min(timeout,(uint16_t)3000));
+  bool ok = http.GET() == HTTP_CODE_OK;
+  if (ok) json = http.getString();
+  http.end();
+  return ok;
+}
+
+static uint8_t *fetchPokemonSprite(const PokemonKey &key,size_t &size){
+  size=0;HTTPClient http;WiFiClient plain;WiFiClientSecure secure;
+  const String path="/v1/pokemon/sprite/"+String(key.game)+"/"+String(key.dex)+"/"+String(key.variant)+"/"+String(key.size)+".pka?animated="+String(key.animated);
+  // Pokémon uses the verified Worker even when the album source is a legacy URL.
+  if(!beginHttp(http,plain,secure,originFromUrl(DEFAULT_FRAME_URL)+path))return nullptr;
+  const char *headers[]={"x-pokemon-sha256"};http.collectHeaders(headers,1);http.setTimeout(18000);http.setConnectTimeout(4000);
+  const int code=http.GET(),length=http.getSize();const String digest=http.header("x-pokemon-sha256");
+  if(code!=200||length<17||length>int(PK_MAX_PACKET)||digest.length()!=64){http.end();return nullptr;}
+  uint8_t *data=(uint8_t*)heap_caps_malloc(length,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);if(!data){http.end();return nullptr;}
+  auto stream=http.getStreamPtr();size_t n=0;const uint32_t start=millis();
+  while(n<size_t(length)&&millis()-start<18000&&displayMode==2){int available=stream->available();
+    if(available>0){int got=stream->read(data+n,min(size_t(available),size_t(length)-n));if(got>0)n+=got;}
+    else if(!http.connected())break;else vTaskDelay(pdMS_TO_TICKS(10));}
+  http.end();PokemonPacket pkt;if(n!=size_t(length)||sha256Hex(data,n)!=digest||!pkt.parse(data,n)||(key.animated&&pkt.frames<2)){free(data);return nullptr;}
+  size=n;return data;
+}
+
+void networkTask(void *) {
+  uint32_t lastPoll = 0, lastRadioPoll = 0, lastPackCheck = 0, idleSince = 0;
+  uint32_t generation = 0;
+  String shownKey, radioHash, knownPack = localPack.version;
+  RemoteSnapshot pack;
+  bool active = false, wasRadio = false, lastWasMusic=false,lastWasIdle=false,wasPokemon=false;
+  uint32_t pollDelay=STATE_POLL_INTERVAL_MS;
+  configTime(0, 0, "pool.ntp.org", "time.google.com");
+  for (;;) {
+    NetworkCommand command;
+    bool forced = xQueueReceive(networkCommands, &command, pdMS_TO_TICKS(50)) == pdTRUE;
+    const bool connected=WiFi.status()==WL_CONNECTED;
+    uint8_t otaCommand;
+    if(connected&&otaQueue&&xQueueReceive(otaQueue,&otaCommand,0)==pdTRUE){
+      if(otaCommand==1)otaCheck(rootca_crt_bundle_start);
+      else if(otaCommand==2)otaInstall(rootca_crt_bundle_start);
+      continue;
+    }
+    if(displayMode==2){wasPokemon=true;pokemon.networkStep(connected?fetchPokemonSprite:nullptr,sha256Hex,fsMutex);continue;}
+    if(wasPokemon){wasPokemon=false;lastPoll=lastRadioPoll=idleSince=0;active=false;wasRadio=lastWasMusic=lastWasIdle=false;shownKey="";radioHash="";pollDelay=STATE_POLL_INTERVAL_MS;}
+    if(!connected)continue;
+    uint32_t now = millis();
+    if (!forced && now - lastPoll < pollDelay) {
+      // Never start an optional high-resolution download ahead of a due
+      // radio/track update. Stale detail requests can be discarded outright.
+      DetailJob detailJob;
+      if(detailJobs&&xQueueReceive(detailJobs,&detailJob,0)==pdTRUE&&detailJob.id==faceArtworkId){
+        // Random artwork must not steal time from a newly started song.
+        uint16_t *detail=faceRandomArtwork&&!lastWasIdle?nullptr:fetchArtworkDetail(detailJob.path,wasRadio);
+        pushNetworkEvent(NetworkEventType::Detail,detailJob.id,false,0,nullptr,detail?"Artwork detail ready":"Artwork detail unavailable",detail);
+      } else serviceFaceJob(lastWasMusic,lastWasIdle,wasRadio);
+      continue;
+    }
+    lastPoll = now;
+    networkBusy = true;
+    WiimPlayback current = pollWiim();
+    lastWasMusic=current.kind==WiimKind::Music||current.kind==WiimKind::Radio;
+    pollDelay=current.kind==WiimKind::Unknown?min(15000UL,pollDelay*2UL):current.kind==WiimKind::Radio?RADIO_POLL_INTERVAL_MS:STATE_POLL_INTERVAL_MS;
+    bool recognized = current.kind == WiimKind::Music || current.kind == WiimKind::Radio;
+    if (recognized) { active = true; idleSince = 0; }
+    else if (current.kind == WiimKind::Idle) {
+      if (!idleSince) idleSince = now;
+      if (now - idleSince >= 10000) { active = false; shownKey = ""; }
+    } else idleSince = 0; // Failed reads are not evidence that music stopped.
+    lastWasIdle=!active&&!recognized;
+    RemoteSnapshot *snapshot = new RemoteSnapshot;
+    snapshot->playing = active;
+    snapshot->playback = active ? "playing" : "idle";
+    snapshot->serviceStatus = current.kind == WiimKind::Unknown ? "WiiM unavailable" : "WiiM connected";
+    snapshot->pendingTitle = current.title;
+    snapshot->generation = generation;
+    pushNetworkEvent(NetworkEventType::State, generation, active, millis()-now,
+                     reinterpret_cast<uint8_t *>(snapshot), "WiiM state");
+    if (current.kind == WiimKind::Music && current.key != shownKey) {
+      uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
+      uint16_t *detail=(uint16_t *)heap_caps_malloc(FACE_DETAIL_SIZE*FACE_DETAIL_SIZE*2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+      if (bytes && wiimArtwork(reinterpret_cast<uint16_t *>(bytes),detail)) {
+        // Reject an image fetched while the user was skipping tracks.
+        WiimPlayback confirm = pollWiim();
+        if (confirm.kind == WiimKind::Music && confirm.key == current.key) {
+          shownKey = current.key;
+          latestRequestedGeneration = ++generation;
+          pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "WiiM artwork",detail);
+        } else {free(bytes);free(detail);}
+      } else {free(bytes);free(detail);}
+    }
+    if (current.kind == WiimKind::Radio && (!wasRadio || forced || now-lastRadioPoll >= RADIO_POLL_INTERVAL_MS)) {
+      lastRadioPoll = now;
+      String json;
+      if (readServiceJson("/v1/radio/kan88/state", json,3500)) {
+        String hash = jsonStringAt(json, "sha256");
+        if (hash.length() == 64 && (hash != radioHash || shownKey != "kan88")) {
+          uint8_t *bytes = (uint8_t *)heap_caps_malloc(FRAME_BYTES, MALLOC_CAP_8BIT);
+          String error;
+          if (bytes && fetchExactFrame(serviceOrigin + "/v1/frames/" + hash + ".rgb565", hash, bytes, error)) {
+            if (pollWiim().kind == WiimKind::Radio) {
+              radioHash = hash; shownKey = "kan88";
+              latestRequestedGeneration = ++generation;
+              pushNetworkEvent(NetworkEventType::Frame, generation, true, millis()-now, bytes, "KAN 88 artwork",nullptr,"/v1/detail/radio/"+hash+".rgb565");
+            } else free(bytes);
+          } else if (bytes) free(bytes);
+        }
+      }
+    }
+    wasRadio = current.kind == WiimKind::Radio;
+    if (!active && current.kind == WiimKind::Idle) {
+      if (!lastPackCheck || now-lastPackCheck >= 60000) {
+        lastPackCheck = now;
+        String json;
+        if (readServiceJson("/v1/fallback/current.json", json)) {
+          pack.packVersion = jsonStringAt(json, "version");
+          pack.packPath = jsonStringAt(json, "pack_url");
+          pack.packSize = jsonUIntAt(json, "size");
+          pack.packCount = jsonUIntAt(json, "count");
+          pack.packMetadataLength = jsonUIntAt(json, "metadata_length");
+        }
+      }
+      if (pack.packVersion.length() == 64 && pack.packVersion != knownPack) {
+        PackInstallInfo *info = new PackInstallInfo{};
+        String error;
+        if (downloadFallbackPack(pack, *info, error)) {
+          knownPack = pack.packVersion;
+          pushNetworkEvent(NetworkEventType::Pack, 0, false, millis()-now,
+                           reinterpret_cast<uint8_t *>(info), "fallback pack ready");
+        } else delete info;
+      }
+    }
+    networkBusy = false;
+    // Radio inference is deferred to the next spare polling window.
+    if(wasRadio)lastPoll=millis();else serviceFaceJob(lastWasMusic,lastWasIdle);
   }
 }
 
@@ -1067,6 +1610,7 @@ bool beginNextFallback(bool manual) {
   prefs.putUShort("packcursor", localPack.cursor);
   prefs.putUShort("packlast", localPack.lastIndex);
   lastFallbackAt = millis();
+  setFaceArtwork(reinterpret_cast<const uint16_t *>(staging),nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(index)+".rgb565",false,false,true);
   startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
   lastResult = "local fallback ready";
   return true;
@@ -1075,6 +1619,11 @@ bool beginNextFallback(bool manual) {
 void processNetworkEvents() {
   NetworkEvent event;
   while (xQueueReceive(networkEvents, &event, 0) == pdTRUE) {
+    if(displayMode==2&&event.type!=NetworkEventType::Pack){
+      if(event.detail)free(event.detail);
+      if(event.data){if(event.type==NetworkEventType::State)delete reinterpret_cast<RemoteSnapshot*>(event.data);else free(event.data);}
+      continue;
+    }
     lastNetworkLatencyMs = event.latencyMs;
     if (event.type == NetworkEventType::State) {
       lastStateAt = millis();
@@ -1095,10 +1644,29 @@ void processNetworkEvents() {
         lastRemoteGeneration = event.generation;
         lastFrameAt = millis();
         lastByteCount = FRAME_BYTES;
-        startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration);
+        const bool radio=strcmp(event.message,"KAN 88 artwork")==0;
+        setFaceArtwork(reinterpret_cast<const uint16_t *>(event.data),event.detail,event.detailPath,
+          radio||strcmp(event.message,"WiiM artwork")==0,radio);
+        event.detail=nullptr;
+        startTransition(reinterpret_cast<const uint16_t *>(event.data), ++nextDisplayGeneration,radio);
         lastResult = event.message;
       }
       if (event.data) free(event.data);
+      if(event.detail)free(event.detail);
+    } else if(event.type==NetworkEventType::Detail) {
+      if(event.generation==faceArtworkId) {
+        faceDetailWaiting=false;
+        if(event.detail){
+          if(faceSource)free(faceSource);
+          faceSource=event.detail;event.detail=nullptr;faceDetailed=true;faceWidth=FACE_DETAIL_SIZE;
+          faceCount=0;faceIndex=-1;facePending=false;
+          faceScanAttempts=0;faceScanRetryAt=0;
+          regionsReady=false;smartRegions=SmartRegions{};
+          if(textIndex>=0||quadrantIndex>=0||zoomAnimating)returnFullCover();
+        } else if(faceDetailAttempts<3){faceDetailRequested=false;faceDetailRetryAt=millis()+2000;}
+        requestFaceDetection();
+      }
+      if(event.detail)free(event.detail);
     } else if (event.type == NetworkEventType::Pack) {
       if (event.data) {
         PackInstallInfo *info = reinterpret_cast<PackInstallInfo *>(event.data);
@@ -1143,6 +1711,10 @@ void handleStatus() {
 
   String j = "{";
   j += "\"fw\":\"" FIRMWARE_VERSION "\",";
+  OtaStatus ota=getOtaStatus();
+  j += "\"ota_state\":"+String(ota.state)+",\"ota_progress\":"+String(ota.progress)+",";
+  j += "\"ota_version\":\""+jsonEscape(ota.version)+"\",\"ota_notes\":\""+jsonEscape(ota.notes)+"\",";
+  j += "\"ota_message\":\""+jsonEscape(ota.message)+"\",\"ota_token\":\""+String(otaToken)+"\",";
   j += "\"ap_mode\":" + String(apMode ? "true" : "false") + ",";
   j += "\"wifi_connected\":" + String(connected ? "true" : "false") + ",";
   j += "\"ssid\":\"" + jsonEscape(wifiSsid) + "\",";
@@ -1151,6 +1723,9 @@ void handleStatus() {
   j += "\"frame_url\":\"" + jsonEscape(frameUrl) + "\",";
   j += "\"brightness\":" + String(brightness) + ",";
   j += "\"color_order\":" + String(colorOrder) + ",";
+#define STATUS_IMAGE(name,lo,hi) j += "\"im_" #name "\":" + String(imageSettings.name) + ",";
+  IMAGE_FIELDS(STATUS_IMAGE)
+#undef STATUS_IMAGE
   j += "\"test_card\":" + String(testCard ? "true" : "false") + ",";
   j += "\"fade_enabled\":" + String(fadeEnabled ? "true" : "false") + ",";
   j += "\"fade_ms\":" + String(transitionMs) + ",";
@@ -1168,7 +1743,42 @@ void handleStatus() {
   j += "\"desat\":" + String(desatPct) + ",";
   j += "\"gamma\":" + String(gammaOn ? "true" : "false") + ",";
   j += "\"display_mode\":" + String(displayMode) + ",";
+  if(displayMode==2)j+="\"pokemon\":"+pokemon.status()+",";
+#define STATUS_AMBIENT(name,lo,hi) j += "\"am_" #name "\":" + String(ambientSettings.name) + ",";
+  AMBIENT_FIELDS(STATUS_AMBIENT)
+#undef STATUS_AMBIENT
+  j += "\"ambient_rendered\":" + String(ambientRendered&&displayMode==0&&!testCard?"true":"false") + ",";
+  j += "\"face_enabled\":" + String(faceEnabled?"true":"false") + ",";
+  j += "\"face_apple_music\":" + String(faceLiveMusic?"true":"false") + ",";
+  j += "\"face_live_music\":" + String(faceLiveMusic?"true":"false") + ",";
+  j += "\"face_radio\":" + String(faceRadioArtwork?"true":"false") + ",";
+  j += "\"face_random\":" + String(faceRandomArtwork?"true":"false") + ",";
+  j += "\"face_eligible\":" + String(faceArtworkEligible(faceLiveMusic,faceRandomArtwork)?"true":"false") + ",";
+  j += "\"face_detail_waiting\":" + String(faceDetailWaiting?"true":"false") + ",";
+  j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
+  j += "\"face_count\":" + String(faceCount) + ",";
+  j += "\"face_index\":" + String(faceIndex) + ",";
+  j += "\"face_detailed\":" + String(faceDetailed?"true":"false") + ",";
+  j += "\"face_source_px\":" + String(faceWidth) + ",";
+  j += "\"face_recovery\":" + String(faceRecovery?"true":"false") + ",";
+  j += "\"quadrant_enabled\":" + String(quadrantEnabled?"true":"false") + ",";
+  j += "\"quadrant_index\":" + String(quadrantIndex) + ",";
+  j += "\"text_enabled\":" + String(textEnabled?"true":"false") + ",";
+  j += "\"saliency_enabled\":" + String(saliencyEnabled?"true":"false") + ",";
+  j += "\"text_count\":" + String(smartRegions.textCount) + ",";
+  j += "\"text_index\":" + String(textIndex) + ",";
+  j += "\"face_sensitivity\":" + String(faceSensitivity) + ",";
+  j += "\"zoom_depth\":" + String(zoomDepth) + ",";
+  j += "\"zoom_hold\":" + String(zoomHold) + ",";
+  j += "\"zoom_delay\":" + String(zoomDelay) + ",";
+  j += "\"zoom_animating\":" + String(zoomAnimating?"true":"false") + ",";
+  j += "\"zoom_duration\":" + String(zoomDuration) + ",";
+  j += "\"zoom_fps\":" + String(zoomFps) + ",";
+  j += "\"zoom_smoothness\":" + String(zoomSmoothness) + ",";
+  j += "\"zoom_render_ms\":" + String(zoomRenderMs) + ",";
   j += "\"audio_ready\":" + String(audioReady ? "true" : "false") + ",";
+  j += "\"audio_failed\":" + String(audioFailed ? "true" : "false") + ",";
+  j += "\"album_audio_level\":" + String(albumAudioLevel) + ",";
   j += "\"audio_rms\":" + String((int)audio::rms()) + ",";
   j += "\"has_frame\":" + String(hasFrame ? "true" : "false") + ",";
   j += "\"playback\":\"" + jsonEscape(remoteState.playback) + "\",";
@@ -1196,18 +1806,118 @@ void handleStatus() {
 }
 
 void handleFrameBin() {
+  if(displayMode==2&&!pokemon.screen){server.send(503,"text/plain","Pokémon preview loading");return;}
+  const uint16_t *art = displayMode==2?pokemon.screen:ambientRendered&&ambientOutput&&displayMode==0&&!testCard
+    ? ambientOutput : adjustedArtwork(transition.active?compositeFrame:frame);
   server.setContentLength(FRAME_BYTES);
   server.send(200, "application/octet-stream", "");
-  server.client().write(reinterpret_cast<const uint8_t *>(frame), FRAME_BYTES);
+  server.client().write(reinterpret_cast<const uint8_t *>(art), FRAME_BYTES);
+}
+
+void handleAmbient(){
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
+  if(server.hasArg("reset"))ambientSettings=AmbientSettings{};
+#define SET_AMBIENT(name,lo,hi) \
+  if(server.hasArg(#name))ambientSettings.name=constrain(server.arg(#name).toInt(),lo,hi); \
+  if(server.hasArg(#name)||server.hasArg("reset"))prefs.putShort("am_" #name,ambientSettings.name);
+  AMBIENT_FIELDS(SET_AMBIENT)
+#undef SET_AMBIENT
+  serviceAlbumAudio();
+  ambientRendered=false;
+  if(displayMode==0)drawFrame();
+  server.send(200,"text/plain","Ambient settings saved");
+}
+
+void handleAlbumAudioLevel(){
+  if(displayMode!=0||ambientSettings.mode!=7){server.send(409,"text/plain","Audio pulse is not active");return;}
+  int level=albumMicActive&&millis()-albumMicSampleAt<=250?albumAudioLevel:-1;
+  server.sendHeader("Cache-Control","no-store");
+  server.send(200,"application/json",String("{\"level\":")+level+",\"ready\":"+(audioReady?"true":"false")+",\"failed\":"+(audioFailed?"true":"false")+"}");
+}
+
+void handleOta(){
+  if(apMode||WiFi.status()!=WL_CONNECTED||!otaQueue){server.send(503,"text/plain","Connect to home Wi-Fi first");return;}
+  if(server.header("X-OTA-Token")!=otaToken){server.send(403,"text/plain","Update confirmation token required");return;}
+  auto s=getOtaStatus();
+  if(s.state==1||s.state==4||s.state==6){server.send(409,"text/plain","Update already in progress");return;}
+  uint8_t command=server.arg("action")=="check"?1:server.arg("action")=="install"?2:0;
+  if(!command||(command==2&&s.state!=2)){server.send(400,"text/plain","Check for an available update first");return;}
+  otaMessage(command==1?1:4,command==1?"Checking for updates":"Preparing update");
+  if(xQueueSend(otaQueue,&command,0)!=pdTRUE){otaMessage(5,"Update queue is busy");server.send(503,"text/plain","Try again");return;}
+  server.send(202,"text/plain","Update request accepted");
+}
+
+void handleImageAdjustments() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
+  if (server.hasArg("reset")) imageSettings = ImageAdjustments{};
+  if (server.hasArg("recommended")) imageSettings = cleanImagePreset();
+#define SET_IMAGE(name,lo,hi) \
+  if (server.hasArg(#name)) imageSettings.name = constrain(server.arg(#name).toInt(),lo,hi); \
+  if (server.hasArg(#name) || server.hasArg("reset") || server.hasArg("recommended")) prefs.putShort("im_" #name,imageSettings.name);
+  IMAGE_FIELDS(SET_IMAGE)
+#undef SET_IMAGE
+  if (displayMode == 0 && !transition.active) drawFrame();
+  server.send(200,"text/plain","Image adjustments saved");
+}
+
+void handleFaceZoom() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
+  if(server.hasArg("value")) {
+    bool enabled=server.arg("value").toInt()!=0;
+    if(enabled!=faceEnabled) {
+      faceEnabled=enabled;prefs.putBool("facezoom",faceEnabled);
+      if(enabled) {faceRecovery=false;faceTriedId=0;faceLastEmpty=0;faceScanAttempts=0;faceScanRetryAt=0;if(!faceBaseValid&&hasFrame)setFaceArtwork(frame);requestArtworkDetail();faceChangedAt=millis();}
+      else {
+        if(faceIndex>=0&&faceBaseValid)returnFullCover();
+      }
+    }
+  }
+  if(server.hasArg("quadrant")) {
+    quadrantEnabled=server.arg("quadrant").toInt()!=0;prefs.putBool("quadzoom",quadrantEnabled);
+    if(quadrantEnabled)requestArtworkDetail();
+    if(!quadrantEnabled&&quadrantIndex>=0)returnFullCover();
+    faceChangedAt=millis();
+  }
+  if(server.hasArg("duration")) {
+    zoomDuration=constrain(server.arg("duration").toInt(),500,8000);prefs.putUShort("zoomdur",zoomDuration);
+  }
+  if(server.hasArg("fps")){zoomFps=constrain(server.arg("fps").toInt(),12,30);prefs.putUChar("zoomfps",zoomFps);}
+  if(server.hasArg("smoothness")){zoomSmoothness=constrain(server.arg("smoothness").toInt(),0,100);prefs.putUChar("zoomsmooth",zoomSmoothness);}
+  if(server.hasArg("text")){textEnabled=server.arg("text").toInt()!=0;prefs.putBool("textzoom",textEnabled);if(textEnabled)requestArtworkDetail();else if(textIndex>=0)returnFullCover();}
+  if(server.hasArg("saliency")){saliencyEnabled=server.arg("saliency").toInt()!=0;prefs.putBool("saliency",saliencyEnabled);regionsReady=false;}
+  if(server.hasArg("sensitivity")){faceSensitivity=constrain(server.arg("sensitivity").toInt(),0,100);prefs.putUChar("facesens",faceSensitivity);faceTriedId=0;faceLastEmpty=0;faceCount=0;faceScanAttempts=0;faceScanRetryAt=0;}
+  if(server.hasArg("depth")){zoomDepth=constrain(server.arg("depth").toInt(),50,150);prefs.putUChar("zoomdepth",zoomDepth);}
+  if(server.hasArg("hold")){zoomHold=constrain(server.arg("hold").toInt(),3,60);prefs.putUChar("zoomhold",zoomHold);}
+  if(server.hasArg("delay")){zoomDelay=constrain(server.arg("delay").toInt(),1,120);prefs.putUChar("zoomdelay",zoomDelay);}
+  if(server.hasArg("rescan")){
+    if(facePending){server.send(409,"text/plain","Face scan already running");return;}
+    uint64_t fingerprint=faceFingerprint^(uint64_t(faceSensitivity)<<56);
+    for(auto &cached:faceCache)if(cached.fingerprint==fingerprint)cached=FaceCacheEntry{};
+    prefs.putBytes("facecache3",faceCache,sizeof(faceCache));
+    faceTriedId=0;faceLastEmpty=0;faceCount=0;regionsReady=false;faceScanAttempts=0;faceScanRetryAt=0;
+    if(!faceDetailed){faceDetailAttempts=0;faceDetailRequested=false;faceDetailWaiting=false;faceDetailRetryAt=0;requestArtworkDetail();}
+    returnFullCover();
+  }
+  if(server.hasArg("nexttext")&&!advanceText()){server.send(409,"text/plain","No available text regions");return;}
+  if(server.hasArg("next")&&!advanceFace()) {
+    server.send(409,"text/plain",facePending?"Face detection in progress":(!faceEnabled?"Enable face zoom first":(!faceCount?"No detected faces":"Wait for transition")));
+    return;
+  }
+  if(server.hasArg("nextquad")&&!advanceQuadrant()) {
+    server.send(409,"text/plain",!quadrantEnabled?"Enable quadrant zoom first":"Wait for artwork / transition");return;
+  }
+  if(server.hasArg("full"))returnFullCover();
+  server.send(200,"text/plain","Face zoom updated");
 }
 
 void applyBrightness(uint8_t value) {
   brightness = constrain(value, 1, 255);
   prefs.putUChar("bright", brightness);
-  if (display) display->setBrightness8(brightness);
+  if (display&&displayMode!=2) display->setBrightness8(brightness);
 }
 
 void handleBrightness() {
+  if(displayMode==2){server.send(409,"text/plain","Use Pokémon brightness in the Scene tab");return;}
   if (server.hasArg("value")) {
     applyBrightness(static_cast<uint8_t>(server.arg("value").toInt()));
   }
@@ -1227,12 +1937,14 @@ void handleColorOrder() {
 }
 
 void handleTestCard() {
+  if(displayMode==2){server.send(409,"text/plain","Switch to album mode first");return;}
   testCard = !testCard;
   drawFrame();
   server.send(200, "text/plain", testCard ? "test card ON" : "test card OFF");
 }
 
 void handleFade() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if (server.hasArg("value")) {
     fadeEnabled = server.arg("value").toInt() != 0;
     prefs.putUChar("fade", fadeEnabled ? 1 : 0);
@@ -1262,17 +1974,38 @@ void handleFade() {
                   "ms hold " + holdMs + "ms method " + fadeMethod);
 }
 
+static void enterPokemon(){
+  // A Pokémon scene owns the panel exclusively. Preserve the album's full
+  // cover and all album preferences, invalidate only in-flight zoom work.
+  if(faceBaseValid){memcpy(frame,faceBase,FRAME_BYTES);memcpy(compositeFrame,frame,FRAME_BYTES);hasFrame=true;}
+  else if(transition.active){memcpy(frame,transitionTo,FRAME_BYTES);memcpy(compositeFrame,frame,FRAME_BYTES);hasFrame=true;}
+  transition.active=false;zoomAnimating=false;ambientRendered=false;testCard=false;nextQueued=false;cachePending=false;
+  ++faceArtworkId;facePending=false;faceDetailWaiting=false;faceDetailRequested=false;faceScanAttempts=0;faceIndex=quadrantIndex=textIndex=-1;currentCrop={0,0,FACE_SOURCE_SIZE};
+  if(faceJobs){FaceJob job;while(xQueueReceive(faceJobs,&job,0)==pdTRUE)free(job.pixels);}if(detailJobs)xQueueReset(detailJobs);
+  pokemon.enter();if(display)display->setBrightness8(pokemon.config.brightness);
+}
 void handleMode() {
   if (server.hasArg("value")) {
-    uint8_t m = constrain(server.arg("value").toInt(), 0, 1);
+    if(otaInstalling()){server.send(409,"text/plain","Firmware update in progress");return;}
+    uint8_t m = constrain(server.arg("value").toInt(), 0, 2);
     if (m != displayMode) {
+      const bool wasPokemon=displayMode==2;
       displayMode = m;
       prefs.putUChar("mode", displayMode);
-      if (displayMode == 0 && hasFrame) drawFrame();
+      if(m==2)enterPokemon();
+      else {if(wasPokemon){pokemon.exit();if(display)display->setBrightness8(brightness);playbackActive=false;manualHoldUntil=millis()+3500;lastFallbackAt=0;faceChangedAt=millis();NetworkCommand command{NetworkCommandType::Refresh};xQueueOverwrite(networkCommands,&command);}
+        if (displayMode == 0 && hasFrame) drawFrame();}
     }
   }
-  server.send(200, "text/plain", displayMode == 1 ? "audio-reactive mode" : "album-art mode");
+  server.send(200, "text/plain", displayMode == 2 ? "Pokémon mode" : displayMode == 1 ? "audio-reactive mode" : "album-art mode");
 }
+
+void handlePokemonSettings(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}
+  pokemon.apply(server);if(display)display->setBrightness8(pokemon.config.brightness);server.send(200,"text/plain","Pokémon settings saved");}
+void handlePokemonAction(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}
+  const int cell=server.hasArg("cell")?server.arg("cell").toInt():-1,id=server.hasArg("id")?server.arg("id").toInt():0;
+  if(!pokemon.action(server.arg("action"),cell,id)){server.send(409,"text/plain","No compatible Pokémon or action available");return;}server.send(200,"text/plain","Pokémon updated");}
+void handlePokemonCatalog(){if(displayMode!=2){server.send(409,"text/plain","Switch to Pokémon mode first");return;}pokemon.catalog(server);}
 
 void handleSave() {
   String newSsid = server.arg("ssid");
@@ -1313,12 +2046,14 @@ void handleSave() {
 }
 
 void handleRefresh() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   NetworkCommand command{NetworkCommandType::Refresh};
   xQueueOverwrite(networkCommands, &command);
   server.send(202, "application/json", "{\"accepted\":true,\"message\":\"Refresh queued\"}");
 }
 
 void handleNext() {
+  if(displayMode==2){server.send(409,"text/plain","Only available in album mode");return;}
   if (playbackActive) {
     server.send(409, "application/json", "{\"error\":\"now_playing_active\",\"message\":\"Next fallback is available when playback is idle\"}");
     return;
@@ -1362,6 +2097,7 @@ void handleNotFound() {
 }
 
 void setupRoutes() {
+  const char *otaHeaders[]={"X-OTA-Token"};server.collectHeaders(otaHeaders,1);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/frame.bin", HTTP_GET, handleFrameBin);
@@ -1370,7 +2106,15 @@ void setupRoutes() {
   server.on("/colororder", HTTP_POST, handleColorOrder);
   server.on("/testcard", HTTP_POST, handleTestCard);
   server.on("/fade", HTTP_POST, handleFade);
+  server.on("/image", HTTP_POST, handleImageAdjustments);
+  server.on("/ambient", HTTP_POST, handleAmbient);
+  server.on("/album-audio-level", HTTP_GET, handleAlbumAudioLevel);
+  server.on("/ota", HTTP_POST, handleOta);
+  server.on("/facezoom", HTTP_POST, handleFaceZoom);
   server.on("/mode", HTTP_POST, handleMode);
+  server.on("/pokemon/settings",HTTP_POST,handlePokemonSettings);
+  server.on("/pokemon/action",HTTP_POST,handlePokemonAction);
+  server.on("/pokemon/catalog",HTTP_GET,handlePokemonCatalog);
   server.on("/refresh", HTTP_POST, handleRefresh);
   server.on("/next", HTTP_POST, handleNext);
   server.on("/restart", HTTP_POST, handleRestart);
@@ -1429,6 +2173,13 @@ void setup() {
   Serial.println("\nAlbum Clock " FIRMWARE_VERSION);
 
   loadSettings();
+  pokemon.begin(prefs);
+  Serial.printf("Reset reason: %d\n",(int)esp_reset_reason());
+  if(faceInferenceMarker==FACE_BUSY_MAGIC && esp_reset_reason()!=ESP_RST_POWERON) {
+    faceEnabled=false;faceRecovery=true;prefs.putBool("facezoom",false);
+    Serial.println("Face detection disabled after interrupted inference");
+  }
+  faceInferenceMarker=0;
   serviceOrigin = originFromUrl(frameUrl);
   if (!serviceOrigin.length()) serviceOrigin = originFromUrl(DEFAULT_FRAME_URL);
   initGammaLUT();
@@ -1437,14 +2188,22 @@ void setup() {
   fsMutex = xSemaphoreCreateMutex();
   networkCommands = xQueueCreate(1, sizeof(NetworkCommand));
   networkEvents = xQueueCreate(6, sizeof(NetworkEvent));
+  faceJobs=xQueueCreate(1,sizeof(FaceJob));
+  faceResults=xQueueCreate(1,sizeof(FaceResult));
+  otaQueue=xQueueCreate(1,sizeof(uint8_t));
+  snprintf(otaToken,sizeof(otaToken),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());
+  detailJobs=xQueueCreate(1,sizeof(DetailJob));
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS mount failed");
   }
   loadLocalPack();
   if (loadCachedFrame()) {
     hasFrame = true;
+    if(localPack.valid&&localPack.lastIndex<localPack.count&&readFallbackFrame(localPack.lastIndex,staging)&&!memcmp(frame,staging,FRAME_BYTES))
+      setFaceArtwork(frame,nullptr,"/v1/detail/fallback/"+localPack.version+"/"+String(localPack.lastIndex)+".rgb565",false,false,true);
+    else setFaceArtwork(frame);
     memcpy(compositeFrame, frame, FRAME_BYTES);
-    if (fadeEnabled) {
+    if (fadeEnabled&&displayMode!=2) {
       memcpy(staging, frame, FRAME_BYTES);
       hasFrame = false;
       startTransition(reinterpret_cast<const uint16_t *>(staging), ++nextDisplayGeneration);
@@ -1452,17 +2211,18 @@ void setup() {
       drawFrame();
     }
     Serial.println("Restored cached frame");
-  } else {
+  } else if(displayMode!=2) {
     showBootPattern();
   }
+  if(displayMode==2){enterPokemon();pokemon.service(draw565);}
 
   pinMode(RESET_CONFIG_PIN, INPUT_PULLUP);
   delay(40);
   bool forcePortal = digitalRead(RESET_CONFIG_PIN) == LOW;
 
-  if (forcePortal || wifiSsid.length() == 0) {
+  if (forcePortal || wifiSsid.length() == 0 || wifiPass.length() == 0) {
     Serial.println(forcePortal ? "BOOT held -> setup portal"
-                               : "No Wi-Fi saved -> setup portal");
+                               : "Wi-Fi credentials missing -> setup portal");
     startApPortal();
     return;
   }
@@ -1472,24 +2232,35 @@ void setup() {
     Serial.printf("Wi-Fi ok, IP %s\n", WiFi.localIP().toString().c_str());
     startStaServices();
   } else {
-    // Router may just be down. Keep showing cached art and retry in loop;
-    // hold BOOT at power-on if you need the setup portal.
-    Serial.println("Wi-Fi not connected yet; will keep retrying");
-    startStaServices();
+    // Make the settings accessible even when the saved credentials are invalid.
+    Serial.println("Wi-Fi connection failed -> setup portal");
+    startApPortal();
+    return;
   }
-  xTaskCreatePinnedToCore(networkTask, "album-network", 12288, nullptr, 1, &networkTaskHandle, 0);
+  xTaskCreatePinnedToCore(networkTask, "album-network", 16384, nullptr, 1, &networkTaskHandle, 0);
+  faceReady=true;requestFaceDetection();
 }
 
 void loop() {
   if (apMode) {
     dnsServer.processNextRequest();
     server.handleClient();
+    serviceAlbumAudio();
+    if(displayMode==2){pokemon.networkStep(nullptr,sha256Hex,fsMutex);pokemon.service(draw565);delay(2);return;}
     serviceTransition();
+    serviceFaces();
+    serviceAmbient();
     return;
   }
 
   processNetworkEvents();
+  server.handleClient();
+  serviceAlbumAudio();
+  if(otaInstalling()){delay(10);return;}
+  if(displayMode==2){pokemon.service(draw565);if(WiFi.status()!=WL_CONNECTED&&millis()-lastReconnectAttempt>=10000){lastReconnectAttempt=millis();WiFi.reconnect();}delay(2);return;}
   serviceTransition();
+  serviceFaces();
+  serviceAmbient();
   if (cachePending && !transition.active) { cachePending = false; persistFrame(); }
 
   if (displayMode == 1) {

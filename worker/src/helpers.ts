@@ -159,8 +159,8 @@ export function rgbaToRgb565(
   contrast = 1.1,
   saturation = 1.06
 ): Uint8Array {
-  const out = new Uint8Array(FRAME_BYTES);
-  const px = DISPLAY * DISPLAY;
+  const px = Math.floor(rgba.byteLength / 4);
+  const out = new Uint8Array(px * 2);
   for (let i = 0; i < px; i++) {
     let r = rgba[i * 4];
     let g = rgba[i * 4 + 1];

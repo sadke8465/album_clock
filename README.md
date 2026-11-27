@@ -195,6 +195,54 @@ cd worker && npm install
 npm run typecheck && npm test
 ```
 
+## Audio pulse (LED album art)
+
+In the local remote, choose **Ambient → Audio pulse**. This is an artwork
+effect, separate from the full-screen audio spectrum and Pokémon modes. It
+works on live WiiM/Apple Music artwork, Kan 88 covers and random artwork,
+including while zooming or transitioning. Highlights and saturated colors
+follow the microphone envelope, with quiet passages dimming the selected
+pixels and louder passages restoring or boosting their original brightness.
+Black pixels stay black; the artwork's hue is preserved.
+
+Choose a target (combined highlights and saturated colors, luminance,
+saturation, peak RGB, or the other existing masks) and adjust intensity,
+threshold, mic sensitivity, noise gate, attack, release and frame rate. The
+remote has a live level meter. Microphone samples are processed on the ESP32;
+no PCM is sent over Wi-Fi. If the mic is unavailable, the original image
+remains visible. Existing ambient settings and Pokémon mode are unaffected
+until you choose Audio pulse.
+
+## Pokémon mode (LED only)
+
+Firmware 4.0 adds a third display mode in the local remote. The mode stays
+selected until you switch it back; music playback cannot replace Pokémon.
+Its Display, Collection, Motion, and Scene tabs are independent of the album
+settings. Choose a single sprite or a 2-, 4-, 6-, 9- or 16-cell layout, tap
+a cell to select it, and use Next, Previous, Pin or Favorite. Collection
+filters include the original game, Pokémon generation, type, evolution stage,
+legendary/mythical status, shiny variants and facing. Game presets use the
+original assets from 16 game collections, covering 809 species. Static game
+eras are available with Original animations only disabled.
+
+Sprite assets are not bundled into the firmware. The Worker retrieves the
+appropriate original sprite from a pinned PokeAPI sprites revision, preserves
+GIF/APNG frame timing and transparency, and serves compact validated PKA1
+packets. The LED matrix decodes these packets locally, with per-cell animation
+clocks and a bounded 4 MiB LittleFS cache isolated from album artwork packs.
+The first visit to an uncached sprite requires Wi-Fi; cached compatible sprites
+can continue offline. Some game/variant combinations have no original assets,
+and the controller skips those rather than substituting fan-made art.
+
+The sprite art belongs to its respective rights holders; this project uses the
+source artwork for a personal display and does not include the artwork in the
+firmware repository. Species metadata generation is reproducible with
+`scripts/generate_pokemon_catalog.py` and PokeAPI CSV data.
+
+For an optional remote browser smoke test, install Playwright/Chromium and run
+`node tests/test_pokemon_remote.cjs` (set `POKEMON_CHROMIUM_EXECUTABLE` to use
+a locally installed Chromium executable).
+
 ## Safety notes
 
 - Disconnect power before moving the HUB75 ribbon.

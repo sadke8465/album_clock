@@ -3,7 +3,7 @@ name: Publish fallback album pack
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, feature/wiim-matrix]
     paths:
       - "data/albums.csv"
       - "scripts/build_fallback_pack.py"
@@ -55,6 +55,20 @@ jobs:
           path: |
             pack-output/current.json
             pack-output/report.json
+      - name: Verify all exact playlist artwork was included
+        run: |
+          python - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from build_fallback_pack import load_catalog
+          direct = {entry.stable_id for entry in load_catalog(Path("data/albums.csv")) if entry.candidate.image_url}
+          report = json.loads(Path("pack-output/report.json").read_text())
+          missing = direct & {entry["id"] for entry in report["skipped"]}
+          if missing:
+              raise SystemExit(f"Refusing to replace current pack: {len(missing)} exact covers missing: {sorted(missing)}")
+          print(f"Verified all {len(direct)} exact covers included.")
+          PY
       - name: Upload immutable pack and publish manifest last
         working-directory: worker
         env:
