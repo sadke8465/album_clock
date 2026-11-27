@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
-import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, type RadioTrack } from "./radio-match";
+import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, type RadioTrack } from "./radio-match";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -876,6 +876,7 @@ function radioImageType(bytes: ArrayBuffer): string {
 
 async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCover | null> {
   const {title,artists}=track;
+  const searchTitle=radioSearchTitle(title)||title;
   const key="kan88:track:v3:"+await hashBytes(new TextEncoder().encode(track.key));
   const cached=await env.KV.get<RadioCover>(key,"json").catch(()=>null);
   if(cached?.sha256&&cached.cover_url)return cached;
@@ -893,7 +894,7 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
     });
   };
   const deezer=async():Promise<RadioCandidate[]>=>{
-    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+title,limit:"40"}),env,2200));
+    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+searchTitle,limit:"40"}),env,2200));
     return (Array.isArray(data?.data)?data.data:[]).flatMap(item=>{
       const row=asRecord(item),artist=asRecord(row?.artist),album=asRecord(row?.album);
       return add(row?.title,artist?.name,stringValue(album?.cover_big)||stringValue(album?.cover_medium),stringValue(album?.title),"Deezer");
@@ -901,7 +902,7 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
   };
   const musicbrainz=async():Promise<RadioCandidate[]>=>{
     const quote=(v:string)=>v.replace(/[\\"]/g,"\\$&");
-    const q=new URLSearchParams({query:'recording:"'+quote(title)+'" AND artist:"'+quote(artists[0])+'"',fmt:"json",limit:"15"});
+    const q=new URLSearchParams({query:'recording:"'+quote(searchTitle)+'" AND artist:"'+quote(artists[0])+'"',fmt:"json",limit:"15"});
     const data=asRecord(await fetchJson("https://musicbrainz.org/ws/2/recording/?"+q,env,2200));
     return (Array.isArray(data?.recordings)?data.recordings:[]).flatMap(item=>{
       const rec=asRecord(item), credits=Array.isArray(rec?.["artist-credit"])?rec["artist-credit"]:[];
@@ -917,8 +918,8 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
   };
   // Parallel catalogue requests: no repeated 2.2s waits per country/provider.
   // The extra title-only search helps with localized artist aliases.
-  const term=artists[0]+" "+title;
-  const results=await Promise.allSettled([apple(term,"il"),apple(title,"il"),apple(term,"us"),apple(term,"gb"),deezer(),musicbrainz()]);
+  const term=artists[0]+" "+searchTitle;
+  const results=await Promise.allSettled([apple(term,"il"),apple(searchTitle,"il"),apple(term,"us"),apple(term,"gb"),deezer(),musicbrainz()]);
   const candidates=results.flatMap(r=>r.status==="fulfilled"?r.value:[]);
   // Prefer original studio albums, then earliest release, for comparably
   // confident matches. An exact compilation still beats a weak wrong song.

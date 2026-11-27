@@ -9,9 +9,19 @@ export function radioNormalize(value: unknown): string {
 const hebrew = /[\u0590-\u05ff]/u;
 const latin = /[a-z]/i;
 const releaseSuffix = /\s*[\[(](?:\d{4}\s*)?(?:remaster(?:ed)?|original mix|mono|stereo|radio edit|גרסה מחודשת)(?:\s+\d{4})?[\])]/gi;
+const dashVersion = /\s+[-–—]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?(?:\s+version)?|original mix|mono|stereo|radio edit|גרסה מחודשת)(?:\s+\d{4})?\s*$/i;
+
+// Kan/Spotify use dash-separated edition tags while Apple often omits them.
+// Remove only recognized technical edition labels, never a song subtitle,
+// part number, alternate take, or live performance descriptor.
+export function radioSearchTitle(value: unknown): string {
+  let title=String(value??'').replace(releaseSuffix,'').trim(), prior:string;
+  do{prior=title;title=title.replace(dashVersion,'').trim();}while(title!==prior);
+  return title;
+}
 
 function variants(value: unknown): string[] {
-  const raw = String(value ?? '').replace(releaseSuffix, '').trim();
+  const raw = radioSearchTitle(value);
   const result = [raw];
   // A separate Hebrew or Latin parenthetical is usually a localized alias,
   // not a version descriptor (e.g. Tzchok Hagoral (צחוק הגורל)).
@@ -109,13 +119,14 @@ export function canPublishRadio(track:RadioTrack,current:RadioTrack|null,now:num
 }
 
 export function radioCompilation(album: string): boolean {
-  return /best of|greatest hits|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
+  return /best of|all the best|\bgreatest\b|hits and history|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
 }
 
 export function rankRadioReleases<T extends {album:string; score:number; compilation:boolean; single:boolean; date:string}>(candidates:T[]):T[] {
   const live=(s:string)=>/\b(?:live at|live in|live from|live album|in concert)\b|\(live\)|הופעה חיה/i.test(s);
+  const soundtrack=(s:string)=>/\bsoundtrack\b|פסקול/i.test(s);
   const confidence=(s:number)=>s>=190?2:s>=180?1:0;
   return candidates.sort((a,b)=>confidence(b.score)-confidence(a.score)||
     Number(a.compilation)-Number(b.compilation)||Number(live(a.album))-Number(live(b.album))||
-    Number(a.single)-Number(b.single)||b.score-a.score||(a.date||'9999').localeCompare(b.date||'9999'));
+    Number(soundtrack(a.album))-Number(soundtrack(b.album))||Number(a.single)-Number(b.single)||b.score-a.score||(a.date||'9999').localeCompare(b.date||'9999'));
 }

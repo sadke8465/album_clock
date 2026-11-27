@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio} from '../src/radio-match.ts';
+import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle} from '../src/radio-match.ts';
 
 test('Kan Hebrew title matches bilingual Apple track from live feed',()=>{
   assert.equal(radioMatchScore('צחוק הגורל',['Peter Roth'],'Tzchok Hagoral (צחוק הגורל)','Peter Roth'),200);
@@ -38,4 +38,17 @@ test('A slow lookup cannot publish over a newer radio song or expired metadata',
   assert.equal(canPublishRadio(a,a,a.end+16000),false);
   assert.equal(parseRadioTrack(x,a.end+16000),null);
   assert.equal(parseRadioTrack(x,a.start-4000),null);
+});
+
+test('Kan dash-separated remaster tags match original catalog titles and credits',()=>{
+  const kan='Live And Let Die - 2018 Remaster';
+  assert.equal(radioSearchTitle(kan),'Live And Let Die');
+  assert.equal(radioSearchTitle('Song - Remastered 2011'),'Song');
+  assert.equal(radioSearchTitle('Song - Part 2'),'Song - Part 2');
+  assert.equal(radioSearchTitle('Song - Live'),'Song - Live');
+  assert.equal(radioMatchScore(kan,['Wings'],'Live and Let Die','Wings'),200);
+  assert.equal(radioMatchScore(kan,['Wings'],'Live And Let Die','Paul McCartney & Wings'),192);
+  assert.equal(radioMatchScore(kan,['Wings'],'Live And Let Die (2022 Remaster)',"Guns N' Roses"),0);
+  const release=(album:string,single=false)=>({album,single,score:200,date:'1973',compilation:radioCompilation(album)});
+  assert.equal(rankRadioReleases([release('Wings Greatest'),release('All the Best!'),release('Wingspan: Hits and History'),release('Shrek The Third (Motion Picture Soundtrack)'),release('Live and Let Die - Single',true)])[0].album,'Live and Let Die - Single');
 });
