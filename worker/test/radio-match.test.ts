@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle,hebrewSearchVariants,radioReleaseQuality} from '../src/radio-match.ts';
+import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle,hebrewSearchVariants,radioReleaseQuality,radioMarket} from '../src/radio-match.ts';
 
 test('Kan Hebrew title matches bilingual Apple track from live feed',()=>{
   assert.equal(radioMatchScore('צחוק הגורל',['Peter Roth'],'Tzchok Hagoral (צחוק הגורל)','Peter Roth'),200);
@@ -77,4 +77,16 @@ test('Stevie Wonder I Wish prefers 1976 original over identical track dates on h
   unknown[0].compilation=false;
   assert.equal(rankRadioReleases(unknown)[0].album,'Original studio album');
   assert.equal(radioReleaseQuality(unknown[1],unknown),'fallback');
+});
+
+test('Japanese Kan metadata uses localized search and verified global artist identity',()=>{
+  const kan='ルーシー・イン・ザ・スカイ・ウィズ・ダイヤモンズ';
+  const apple='ルーシー・イン・ザ・スカイ・ウィズ・ダイアモンズ (Remastered 2017)';
+  assert.equal(radioMarket(kan),'jp');
+  assert.equal(radioMarket('חוזרים הביתה'),'il');
+  // Apple artist ID 136975 maps localized ビートルズ to The Beatles in US.
+  assert.ok(radioMatchScore(kan,['The Beatles'],apple,'The Beatles')>=190);
+  assert.equal(radioMatchScore(kan,['The Beatles'],apple,'Elton John'),0);
+  const r=(album:string,score:number)=>({album,score,source:'Apple Music JP',date:'1967',albumDate:'1967',single:false,compilation:radioCompilation(album)});
+  assert.equal(rankRadioReleases([r('The Beatles 1967–1970 (2023 Edition) [The Blue Album]',200),r('Sgt. Pepper\'s Lonely Hearts Club Band (Super Deluxe Edition) [2017 Remix & Remaster]',200),r('Sgt. Pepper\'s Lonely Hearts Club Band (2017 Mix)',195)])[0].album,'Sgt. Pepper\'s Lonely Hearts Club Band (2017 Mix)');
 });

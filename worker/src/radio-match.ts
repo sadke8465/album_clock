@@ -15,9 +15,16 @@ const dashVersion = /\s+[-–—]\s*(?:\d{4}\s+)?(?:remaster(?:ed)?(?:\s+version
 // Remove only recognized technical edition labels, never a song subtitle,
 // part number, alternate take, or live performance descriptor.
 export function radioSearchTitle(value: unknown): string {
-  let title=String(value??'').replace(releaseSuffix,'').trim(), prior:string;
+  let title=String(value??'').replace(releaseSuffix,'').replace(/\s*[\[(]\d{4}\s+(?:remix|mix)[\])]/gi,'').trim(), prior:string;
   do{prior=title;title=title.replace(dashVersion,'').trim();}while(title!==prior);
   return title;
+}
+
+export function radioMarket(title:string):string{
+  if(/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(title))return 'jp';
+  if(/\p{Script=Hangul}/u.test(title))return 'kr';
+  if(/\p{Script=Han}/u.test(title))return 'tw';
+  return 'il';
 }
 
 function variants(value: unknown): string[] {
@@ -148,16 +155,17 @@ export function canPublishRadio(track:RadioTrack,current:RadioTrack|null,now:num
 }
 
 export function radioCompilation(album: string): boolean {
-  return /best of|all the best|\bgreatest\b|\bhits\b|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|\bnumber\s*1['’]?s\b|\bmotown\s+25\b|\bat the close of a century\b|\boriginal musiquarium\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
+  return /best of|all the best|\bgreatest\b|\bhits\b|collection|anthology|compilation|\bthe essential\b|\bthe very best\b|\bcomplete recordings\b|\bnumber\s*1['’]?s\b|\bmotown\s+25\b|\bat the close of a century\b|\boriginal musiquarium\b|\bthe beatles\s+\d{4}\s*[-–—]\s*\d{4}\b|המיטב|אוסף|להיטים|כל השירים|various artists|אמנים שונים/i.test(album);
 }
 
 export interface RadioReleaseEvidence {album:string;score:number;compilation:boolean;single:boolean;date:string;albumDate?:string;source?:string;order?:number;}
 const live=(s:string)=>/\b(?:live at|live in|live from|live album|in concert)\b|\(live\)|הופעה חיה/i.test(s);
-const soundtrack=(s:string)=>/\bsoundtrack\b|פסקול/i.test(s);
+const soundtrack=(s:string)=>/\b(?:soundtrack|songtrack)\b|פסקול/i.test(s);
+const deluxe=(s:string)=>/\b(?:super deluxe|deluxe edition|box set|expanded edition|archive collection)\b|מהדורה מיוחדת/i.test(s);
 const provider=(s:string='')=>s.startsWith('Apple Music')?'apple':s==='Deezer'?'deezer':s==='MusicBrainz'?'musicbrainz':s;
 const year=(s:string='')=>/^\d{4}/.test(s)?Number(s.slice(0,4)):9999;
 export function radioAlbumKey(s:string):string{
-  return radioNormalize(s.replace(/\s*[\[(][^\])]*(?:remaster|deluxe|expanded|anniversary|special edition|מהדורה מיוחדת)[^\])]*[\])]/gi,'').replace(/\s+[-–—]\s+(?:deluxe|expanded|special edition|מהדורה מיוחדת).*$/i,''));
+  return radioNormalize(s.replace(/\s*[\[(][^\])]*(?:remaster|deluxe|expanded|anniversary|special edition|\d{4}\s+(?:mix|remix)|מהדורה מיוחדת)[^\])]*[\])]/gi,'').replace(/\s+[-–—]\s+(?:deluxe|expanded|special edition|מהדורה מיוחדת).*$/i,''));
 }
 
 export function rankRadioReleases<T extends RadioReleaseEvidence>(candidates:T[]):T[] {
@@ -167,22 +175,22 @@ export function rankRadioReleases<T extends RadioReleaseEvidence>(candidates:T[]
   for(const c of candidates){
     const key=radioAlbumKey(c.album),g=groups.get(key)??{providers:new Set(),year:9999,compilation:false};
     if(c.source)g.providers.add(provider(c.source));
-    g.year=Math.min(g.year,year(c.albumDate));g.compilation ||= c.compilation;groups.set(key,g);
+    g.year=Math.min(g.year,year(c.albumDate));g.compilation ||= c.compilation&&!deluxe(c.album);groups.set(key,g);
   }
   const evidence=(c:T)=>groups.get(radioAlbumKey(c.album))!;
   const datePenalty=(c:T)=>{const y=evidence(c).year;return y===9999?1:firstYear!==9999&&y>firstYear+2?2:0;};
   const preference=(c:T)=>provider(c.source)==='apple'?0:provider(c.source)==='deezer'?1:2;
   return candidates.sort((a,b)=>confidence(b.score)-confidence(a.score)||
-    Number(evidence(a).compilation)-Number(evidence(b).compilation)||Number(live(a.album))-Number(live(b.album))||
+    Number(a.compilation||evidence(a).compilation)-Number(b.compilation||evidence(b).compilation)||Number(live(a.album))-Number(live(b.album))||
     Number(soundtrack(a.album))-Number(soundtrack(b.album))||datePenalty(a)-datePenalty(b)||
-    Number(a.single)-Number(b.single)||evidence(b).providers.size-evidence(a).providers.size||
+    Number(a.single)-Number(b.single)||Number(deluxe(a.album))-Number(deluxe(b.album))||evidence(b).providers.size-evidence(a).providers.size||
     b.score-a.score||evidence(a).year-evidence(b).year||(a.date||'9999').localeCompare(b.date||'9999')||
     preference(a)-preference(b)||(a.order??999)-(b.order??999));
 }
 
 export function radioReleaseQuality(c:RadioReleaseEvidence,candidates:RadioReleaseEvidence[]):'original'|'fallback'{
   const group=candidates.filter(r=>radioAlbumKey(r.album)===radioAlbumKey(c.album));
-  if(group.some(r=>r.compilation)||live(c.album)||soundtrack(c.album)||c.score<190)return 'fallback';
+  if(c.compilation||group.some(r=>r.compilation&&!deluxe(r.album))||live(c.album)||soundtrack(c.album)||c.score<190)return 'fallback';
   const firstYear=Math.min(9999,...candidates.filter(r=>r.score>=180).map(r=>year(r.date)));
   const releaseYear=Math.min(9999,...group.map(r=>year(r.albumDate)));
   if(firstYear!==9999&&releaseYear!==9999&&releaseYear>firstYear+2)return 'fallback';

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
-import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, radioReleaseQuality, radioAlbumKey, type RadioTrack } from "./radio-match";
+import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, radioReleaseQuality, radioAlbumKey, radioMarket, type RadioTrack } from "./radio-match";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -916,6 +916,7 @@ function radioImageType(bytes: ArrayBuffer): string {
 async function resolveRadioCover(env: Env, track: RadioTrack, improve=false): Promise<RadioCover | null> {
   const {title,artists}=track;
   const searchTitle=radioSearchTitle(title)||title;
+  const market=radioMarket(searchTitle);
   const key=await radioCacheKey(track);
   const cached=improve?null:await env.KV.get<RadioCover>(key,"json").catch(()=>null);
   if(cached?.sha256&&cached.cover_url&&cached.policy===RADIO_POLICY)return cached;
@@ -925,9 +926,23 @@ async function resolveRadioCover(env: Env, track: RadioTrack, improve=false): Pr
   };
   const apple=async(term:string,country:string):Promise<RadioCandidate[]>=>{
     const data=asRecord(await radioJson("https://itunes.apple.com/search?"+new URLSearchParams({term,country,entity:"song",limit:"50"}),env,3300));
-    return (Array.isArray(data?.results)?data.results:[]).flatMap((item,order)=>{
-      const row=asRecord(item);
-      return add(row?.trackName,row?.artistName,stringValue(row?.artworkUrl100).replace(/100x100(?:bb)?/,"600x600bb"),
+    const rows=(Array.isArray(data?.results)?data.results:[]).map(asRecord);
+    const aliases=new Map<string,string>();
+    // Apple Japan/Korea/Taiwan localize artist names as well as song names.
+    // Resolve the unchanged numeric artist ID to its US catalogue name;
+    // this is verified identity evidence, not a title-only guess.
+    if(["jp","kr","tw"].includes(country)){
+      const ids=[...new Set(rows.filter(r=>r&&typeof r.artistId==="number"&&stringValue(r.artistName)&&
+        radioMatchScore(title,[stringValue(r.artistName)],r.trackName,r.artistName)>0&&
+        !radioMatchScore(title,artists,r.trackName,r.artistName)).map(r=>String(r!.artistId)))].slice(0,8);
+      if(ids.length)try{
+        const names=asRecord(await radioJson("https://itunes.apple.com/lookup?"+new URLSearchParams({id:ids.join(","),country:"us",entity:"musicArtist"}),env,2000));
+        for(const item of Array.isArray(names?.results)?names.results:[]){const r=asRecord(item);if(r&&typeof r.artistId==="number")aliases.set(String(r.artistId),stringValue(r.artistName));}
+      }catch{}
+    }
+    return rows.flatMap((row,order)=>{
+      const artist=radioMatchScore(title,artists,row?.trackName,row?.artistName)?row?.artistName:aliases.get(String(row?.artistId))||row?.artistName;
+      return add(row?.trackName,artist,stringValue(row?.artworkUrl100).replace(/100x100(?:bb)?/,"600x600bb"),
         stringValue(row?.collectionName),"Apple Music "+country.toUpperCase(),stringValue(row?.releaseDate))
         .map(c=>({...c,appleId:typeof row?.collectionId==="number"?String(row.collectionId):undefined,order}));
     });
@@ -962,14 +977,14 @@ async function resolveRadioCover(env: Env, track: RadioTrack, improve=false): Pr
   // Start fewer requests per Apple storefront to avoid rate limiting. Other
   // markets, title-only, and alternate artists are used on the second pass.
   const term=artists[0]+" "+searchTitle;
-  const results=await Promise.allSettled([apple(term,"il"),apple(term,"us"),deezer(),musicbrainz()]);
+  const results=await Promise.allSettled([apple(term,market),apple(term,"us"),deezer(),musicbrainz()]);
   const candidates=results.flatMap(r=>r.status==="fulfilled"?r.value:[]);
   // Israeli stations sometimes give only the transliterated title while
   // catalogue search indexes only Hebrew. Use phonetic queries as a bounded
   // second pass only when the normal searches found no confident match.
   if(improve||!candidates.some(c=>c.score>=190&&!c.compilation)){
     const alternates=candidates.some(c=>c.score>=180)?[]:hebrewSearchVariants(searchTitle);
-    const jobs=[apple(searchTitle,"il"),apple(term,"gb"),...alternates.map(t=>apple(artists[0]+" "+t,"il"))];
+    const jobs=[apple(searchTitle,market),apple(term,"gb"),...alternates.map(t=>apple(artists[0]+" "+t,"il"))];
     if(alternates[0])jobs.push(deezer(alternates[0]));
     if(artists[1])jobs.push(apple(artists[1]+" "+(alternates[0]||searchTitle),"il"));
     const additional=await Promise.allSettled(jobs.slice(0,6));
@@ -991,7 +1006,7 @@ async function resolveRadioCover(env: Env, track: RadioTrack, improve=false): Pr
   const ids=[...new Set(candidates.filter(c=>c.score>=180&&c.appleId).map(c=>c.appleId!))].slice(0,16);
   if(ids.length){
     try{
-      const data=asRecord(await radioJson("https://itunes.apple.com/lookup?"+new URLSearchParams({id:ids.join(","),entity:"album",country:"il"}),env,2300));
+      const data=asRecord(await radioJson("https://itunes.apple.com/lookup?"+new URLSearchParams({id:ids.join(","),entity:"album",country:market}),env,2300));
       const albums=new Map((Array.isArray(data?.results)?data.results:[]).map(v=>{const row=asRecord(v);return [String(row?.collectionId),row] as const;}));
       for(const c of candidates)if(c.appleId){
         const row=albums.get(c.appleId);if(!row)continue;
