@@ -6,6 +6,21 @@ import unittest
 
 
 class AmbientAndOtaTests(unittest.TestCase):
+    def test_motion_frames_share_ambient_compositor(self):
+        # Regression: zoom and cover transitions previously drew the raw
+        # frame, then waited for the idle renderer to restore ambient.
+        main = (pathlib.Path(__file__).resolve().parents[1] / "firmware" / "src" / "main.cpp").read_text()
+        present = main.split("static void presentArtwork(", 1)[1].split("void drawFrame()", 1)[0]
+        self.assertIn("presentAmbientBase(millis())", present)
+        draw = main.split("void drawFrame()", 1)[1].split("void showBootPattern()", 1)[0]
+        self.assertIn("presentArtwork(transition.active?compositeFrame:frame)", draw)
+        zoom = main.split("static void serviceCropZoom()", 1)[1].split("static void returnFullCover()", 1)[0]
+        self.assertIn("drawFrame();", zoom)
+        transition = main.split("void serviceTransition()", 1)[1].split("void renderSpectrum()", 1)[0]
+        self.assertIn("presentArtwork(compositeFrame)", transition)
+        self.assertIn("presentArtwork(frame)", transition)
+        self.assertNotIn("draw565(", transition)
+
     @unittest.skipUnless(shutil.which("g++"), "host C++ compiler unavailable")
     def test_rendering_and_manifest(self):
         header = pathlib.Path(__file__).resolve().parents[1] / "firmware" / "include"
@@ -58,6 +73,15 @@ int main(){
         else{assert(imageG(out[i])==0&&imageB(out[i])==0);if(out[i]!=base[i])nativeChanged++;}
     }
     assert(nativeChanged>50);
+    // A motion frame and its final still frame use the same time phase;
+    // composing a different crop between them must not reset the shimmer.
+    ambientRender(base,out,a,3456);
+    for(int i=0;i<4096;i++)copy[i]=image565(90,20,140);
+    ambientRender(copy,second,a,3456);
+    ambientRender(base,second,a,3456);
+    assert(!memcmp(out,second,sizeof(out)));
+    ambientRender(base,second,a,3489);
+    assert(memcmp(out,second,sizeof(out)));
     assert(otaNewer("3.8.1-wiim","3.8.0-wiim"));
     assert(otaNewer("3.10.0-wiim","3.9.9-wiim"));
     assert(!otaNewer("3.7.9-wiim","3.8.0-wiim"));

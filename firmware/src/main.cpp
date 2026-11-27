@@ -254,25 +254,38 @@ static void rememberAmbientBase(const uint16_t *art) {
   if(ambientBaseValid)memcpy(ambientBase,art,FRAME_BYTES);
 }
 
+static void draw565(int x, int y, uint16_t value);
+
+// Ambient is a final compositing pass, not a separate display mode. All
+// artwork frames (zoom, transition, or still) share the same wall-clock phase.
+static void presentAmbientBase(uint32_t now) {
+  ambientRender(ambientBase,ambientOutput,ambientSettings,now);
+  ambientLastDraw=now;
+  ambientRendered=true;
+  for(int y=0;y<FRAME_HEIGHT;y++)for(int x=0;x<FRAME_WIDTH;x++)
+    draw565(x,y,ambientOutput[y*FRAME_WIDTH+x]);
+}
+
+static void presentArtwork(const uint16_t *source) {
+  const uint16_t *art=adjustedArtwork(source);
+  rememberAmbientBase(art);
+  if(ambientBaseValid&&displayMode==0&&!otaInstalling()) {
+    presentAmbientBase(millis());
+    return;
+  }
+  for(int y=0;y<FRAME_HEIGHT;y++)for(int x=0;x<FRAME_WIDTH;x++)
+    draw565(x,y,art[y*FRAME_WIDTH+x]);
+}
+
 void drawFrame() {
   if (!display) return;
   if (testCard) {
+    ambientRendered=false;
+    ambientBaseValid=false;
     drawTestCard();
     return;
   }
-  const uint16_t *art = adjustedArtwork(frame);
-  rememberAmbientBase(art);
-  for (int y = 0; y < FRAME_HEIGHT; y++) {
-    for (int x = 0; x < FRAME_WIDTH; x++) {
-      uint16_t v = art[y * FRAME_WIDTH + x];
-      uint8_t r5 = (v >> 11) & 0x1F, g6 = (v >> 5) & 0x3F, b5 = v & 0x1F;
-      // Expand to 8-bit per channel.
-      uint8_t r = (r5 << 3) | (r5 >> 2);
-      uint8_t g = (g6 << 2) | (g6 >> 4);
-      uint8_t b = (b5 << 3) | (b5 >> 2);
-      drawTrue(x, y, r, g, b);
-    }
-  }
+  presentArtwork(transition.active?compositeFrame:frame);
 }
 
 void showBootPattern() {
@@ -396,14 +409,6 @@ void drawBlend(int x, int y, uint16_t vo, uint16_t vn, float ow, float nw) {
   drawTrue(x, y, (uint8_t)r, (uint8_t)g, (uint8_t)b);
 }
 
-void drawFinal(const uint16_t *buf) {
-  buf = adjustedArtwork(buf);
-  rememberAmbientBase(buf);
-  for (int y = 0; y < FRAME_HEIGHT; y++)
-    for (int x = 0; x < FRAME_WIDTH; x++)
-      drawScaled(x, y, buf[y * FRAME_WIDTH + x], 1.0f);
-}
-
 static uint16_t scaled565(uint16_t value, float amount) {
   amount = amount < 0 ? 0 : (amount > 1 ? 1 : amount);
   uint8_t r5 = (value >> 11) & 0x1F, g6 = (value >> 5) & 0x3F, b5 = value & 0x1F;
@@ -431,15 +436,12 @@ static void draw565(int x, int y, uint16_t value) {
 }
 
 static void serviceAmbient() {
-  // The artwork and zoom animations own the panel during transitions.
-  // Filtering is cached; the effect does not touch source images or flash.
+  // Motion frames already contain ambient; only repaint stationary artwork
+  // here, at the configured ambient FPS, to avoid redundant panel passes.
   if(!ambientSettings.mode||!ambientBaseValid||!hasFrame||!display||testCard||displayMode!=0||transition.active||zoomAnimating||otaInstalling())return;
   uint32_t now=millis();
   if(now-ambientLastDraw<(uint32_t)(1000/ambientSettings.fps))return;
-  ambientLastDraw=now;
-  ambientRender(ambientBase,ambientOutput,ambientSettings,now);
-  for(int y=0;y<64;y++)for(int x=0;x<64;x++)draw565(x,y,ambientOutput[y*64+x]);
-  ambientRendered=true;
+  presentAmbientBase(now);
 }
 
 bool beginNextFallback(bool manual);
@@ -706,11 +708,6 @@ void serviceTransition() {
     }
   }
 
-  if (!testCard) {
-    const uint16_t *art = adjustedArtwork(compositeFrame);
-    for (int y=0;y<FRAME_HEIGHT;y++) for (int x=0;x<FRAME_WIDTH;x++)
-      draw565(x,y,art[y*FRAME_WIDTH+x]);
-  }
   if (progress >= 1.0f) {
     memcpy(frame, transitionTo, FRAME_BYTES);
     memcpy(compositeFrame, frame, FRAME_BYTES);
@@ -718,12 +715,12 @@ void serviceTransition() {
     hasFrame = true;
     displayGeneration = transition.generation;
     cachePending = true;
-    if (!testCard) drawFinal(frame);
+    if (!testCard) presentArtwork(frame);
     if (nextQueued && !playbackActive) {
       nextQueued = false;
       beginNextFallback(false);
     }
-  }
+  } else if (!testCard) presentArtwork(compositeFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -1659,7 +1656,7 @@ void handleStatus() {
 #define STATUS_AMBIENT(name,lo,hi) j += "\"am_" #name "\":" + String(ambientSettings.name) + ",";
   AMBIENT_FIELDS(STATUS_AMBIENT)
 #undef STATUS_AMBIENT
-  j += "\"ambient_rendered\":" + String(ambientRendered&&!transition.active&&!zoomAnimating&&displayMode==0&&!testCard?"true":"false") + ",";
+  j += "\"ambient_rendered\":" + String(ambientRendered&&displayMode==0&&!testCard?"true":"false") + ",";
   j += "\"face_enabled\":" + String(faceEnabled?"true":"false") + ",";
   j += "\"face_apple_music\":" + String(faceAppleMusic?"true":"false") + ",";
   j += "\"face_pending\":" + String(facePending?"true":"false") + ",";
@@ -1711,7 +1708,7 @@ void handleStatus() {
 }
 
 void handleFrameBin() {
-  const uint16_t *art = ambientRendered&&ambientOutput&&!transition.active&&!zoomAnimating&&displayMode==0&&!testCard
+  const uint16_t *art = ambientRendered&&ambientOutput&&displayMode==0&&!testCard
     ? ambientOutput : adjustedArtwork(transition.active?compositeFrame:frame);
   server.setContentLength(FRAME_BYTES);
   server.send(200, "application/octet-stream", "");
@@ -1726,7 +1723,7 @@ void handleAmbient(){
   AMBIENT_FIELDS(SET_AMBIENT)
 #undef SET_AMBIENT
   ambientRendered=false;
-  if(displayMode==0&&!transition.active)drawFrame();
+  if(displayMode==0)drawFrame();
   server.send(200,"text/plain","Ambient settings saved");
 }
 
