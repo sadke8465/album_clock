@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { PhotonImage, SamplingFilter, crop, resize } from "@cf-wasm/photon";
 import albumsCsv from "../../data/albums.csv";
-import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, type RadioTrack } from "./radio-match";
+import { radioMatchScore, radioCompilation, rankRadioReleases, parseRadioTrack, canPublishRadio, radioSearchTitle, hebrewSearchVariants, type RadioTrack } from "./radio-match";
 import {
   FRAME_BYTES,
   albumsFromCsv,
@@ -893,8 +893,8 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
         /various artists|אמנים שונים/i.test(stringValue(row?.collectionArtistName)));
     });
   };
-  const deezer=async():Promise<RadioCandidate[]>=>{
-    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+searchTitle,limit:"40"}),env,2200));
+  const deezer=async(queryTitle=searchTitle):Promise<RadioCandidate[]>=>{
+    const data=asRecord(await fetchJson("https://api.deezer.com/search?"+new URLSearchParams({q:artists[0]+" "+queryTitle,limit:"40"}),env,2200));
     return (Array.isArray(data?.data)?data.data:[]).flatMap(item=>{
       const row=asRecord(item),artist=asRecord(row?.artist),album=asRecord(row?.album);
       return add(row?.title,artist?.name,stringValue(album?.cover_big)||stringValue(album?.cover_medium),stringValue(album?.title),"Deezer");
@@ -921,6 +921,16 @@ async function resolveRadioCover(env: Env, track: RadioTrack): Promise<RadioCove
   const term=artists[0]+" "+searchTitle;
   const results=await Promise.allSettled([apple(term,"il"),apple(searchTitle,"il"),apple(term,"us"),apple(term,"gb"),deezer(),musicbrainz()]);
   const candidates=results.flatMap(r=>r.status==="fulfilled"?r.value:[]);
+  // Israeli stations sometimes give only the transliterated title while
+  // catalogue search indexes only Hebrew. Use phonetic queries as a bounded
+  // second pass only when the normal searches found no confident match.
+  if(!candidates.some(c=>c.score>=180)){
+    const alternates=hebrewSearchVariants(searchTitle);
+    if(alternates.length){
+      const additional=await Promise.allSettled([...alternates.map(t=>apple(artists[0]+" "+t,"il")),deezer(alternates[0])]);
+      candidates.push(...additional.flatMap(r=>r.status==="fulfilled"?r.value:[]));
+    }
+  }
   // Prefer original studio albums, then earliest release, for comparably
   // confident matches. An exact compilation still beats a weak wrong song.
   rankRadioReleases(candidates);

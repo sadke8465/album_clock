@@ -57,14 +57,41 @@ function skeleton(value: string): string[] {
   if(hebrew.test(value)) {
     const base = [...value].map(c=>consonants[c]??c).join('');
     const variants=[base,base.replace(/v/g,''),base.replace(/h/g,''),base.replace(/[hv]/g,''),base.replace(/p/g,'f'),base.replace(/b/g,'v')];
-    return [...new Set([...variants,...variants.map(v=>v.replace(/x/g,'h'))])];
+    const folded=[...variants,...variants.map(v=>v.replace(/x/g,'h'))];
+    return [...new Set([...folded,...folded.map(v=>v.replace(/h$/,''))])];
   }
   const fold=(v:string)=>v.replace(/tz|ts/g,'c').replace(/sh/g,'s')
     .replace(/th/g,'t').replace(/ph/g,'f').replace(/q/g,'k').replace(/w/g,'v').replace(/[aeiouy]/g,'');
   // Also retain literal k+h: the digraph may straddle a removed space.
   const bases=[fold(value.replace(/ch|kh/g,'x')),fold(value.replace(/ch/g,'x'))];
   const variants=bases.flatMap(base=>[base,base.replace(/h/g,''),base.replace(/v/g,''),base.replace(/[hv]/g,'')]);
-  return [...new Set([...variants,...variants.map(v=>v.replace(/x/g,'h'))])];
+  const folded=[...variants,...variants.map(v=>v.replace(/x/g,'h'))];
+  return [...new Set([...folded,...folded.map(v=>v.replace(/h$/,''))])];
+}
+
+// Search-only phonetic guesses for Israeli titles reported in Latin script.
+// They do not establish a match; the original metadata is always scored.
+export function hebrewSearchVariants(value: string): string[] {
+  if(hebrew.test(value)||!/[a-z]/i.test(value))return [];
+  const words=value.toLowerCase().match(/[a-z]+/g)??[];
+  if(!words.length||words.length>10)return [];
+  const letters:Record<string,string>={b:'ב',g:'ג',d:'ד',h:'ה',v:'ו',w:'ו',z:'ז',t:'ת',y:'י',k:'ק',q:'ק',l:'ל',m:'מ',n:'נ',s:'ס',p:'פ',f:'פ',r:'ר',c:'ק',j:'י',x:'ח'};
+  const digraphs:Record<string,string>={sh:'ש',ch:'ח',kh:'כ',tz:'צ',ts:'צ',ph:'פ',th:'ת',ai:'י',ay:'י',ei:'י',ey:'י'};
+  const convert=(word:string,guttural:boolean)=>{
+    let out='';
+    for(let i=0;i<word.length;i++){
+      const pair=word.slice(i,i+2),c=word[i];
+      if(digraphs[pair]){out+=digraphs[pair];i++;continue;}
+      if(c==='a'){if(i===0)out+='א';else if(i===word.length-1)out+='ה';continue;}
+      if(c==='e'){if(i===0)out+='א';continue;}
+      if(c==='i'){out+='י';continue;}
+      if(c==='o'||c==='u'){out+='ו';continue;}
+      if(c==='h'&&guttural&&i===0&&word[1]!=='a'){out+='ח';continue;}
+      out+=letters[c]??'';
+    }
+    return out.replace(/מ$/,'ם').replace(/נ$/,'ן').replace(/צ$/,'ץ').replace(/פ$/,'ף').replace(/כ$/,'ך');
+  };
+  return [...new Set([true,false].map(g=>words.map(word=>convert(word,g)).join(' ')))].filter(s=>s.length>=4);
 }
 
 function nameScore(expected: unknown, actual: unknown): number {

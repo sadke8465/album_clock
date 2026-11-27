@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle} from '../src/radio-match.ts';
+import {radioMatchScore,radioTrackKey,radioCompilation,rankRadioReleases,parseRadioTrack,canPublishRadio,radioSearchTitle,hebrewSearchVariants} from '../src/radio-match.ts';
 
 test('Kan Hebrew title matches bilingual Apple track from live feed',()=>{
   assert.equal(radioMatchScore('צחוק הגורל',['Peter Roth'],'Tzchok Hagoral (צחוק הגורל)','Peter Roth'),200);
@@ -51,4 +51,12 @@ test('Kan dash-separated remaster tags match original catalog titles and credits
   assert.equal(radioMatchScore(kan,['Wings'],'Live And Let Die (2022 Remaster)',"Guns N' Roses"),0);
   const release=(album:string,single=false)=>({album,single,score:200,date:'1973',compilation:radioCompilation(album)});
   assert.equal(rankRadioReleases([release('Wings Greatest'),release('All the Best!'),release('Wingspan: Hits and History'),release('Shrek The Third (Motion Picture Soundtrack)'),release('Live and Let Die - Single',true)])[0].album,'Live and Let Die - Single');
+});
+
+test('Latin-only Kan titles can find their Hebrew catalogue originals',()=>{
+  const title='Hozrim Habaita',artists=['Shlomo Artzi','Arik Einstein'];
+  assert.ok(hebrewSearchVariants(title).includes('חוזרים הביתה'));
+  assert.ok(radioMatchScore(title,artists,'חוזרים הביתה','Shlomo Artzi')>=190);
+  assert.ok(radioMatchScore(title,artists,'חוזרים הבית','Arik Einstein & Shlomo Artzi')>=180);
+  assert.equal(radioMatchScore(title,artists,'Hozrim Habaita','ariela savir'),0);
 });
